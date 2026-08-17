@@ -1,0 +1,518 @@
+From 8c528751790c9af50298507ddc26f8427fcacb46 Mon Sep 17 00:00:00 2001
+From: Kissshot <ttyinzg@gmail.com>
+Date: Mon, 17 Aug 2026 13:24:32 +0800
+Subject: [PATCH 3/3] feat(session): let a log-only append declare itself
+ ignorable
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The ignorable envelope field decides whether a reader that does not
+recognize an event type may skip it or must refuse the whole log. Seed
+validation, both persistence backends, and the wire schema already
+honored it, but no writer could set one: append's only optional
+parameter was SurfaceIntent, and the envelope was built without the
+field, so every event type outside this build's vocabulary was
+required-on-read. This supplies the missing producer the session-log
+version mechanism reserved for its first user.
+
+The options parameter now selects one of two disjoint types by event
+class: a SurfaceEventType keeps requiring SurfaceIntent, and every other
+type accepts an optional LogIntent carrying ignorable. Disjoint types
+rather than one merged object make two mistakes unrepresentable — a
+surface placement on a log-only event, and an ignorable marker on a
+message-producing one. The second matters most: a surface event is
+always a recognized model-visible type, so a reader skipping one would
+silently drop model context.
+
+SESSION_FORMAT_VERSION stays 0; the field was already in the envelope.
+---
+ ...tory-control-and-in-place-rewind.i18n.yaml |  4 +-
+ ...-trajectory-control-and-in-place-rewind.md | 16 ++++---
+ ...ajectory-control-and-in-place-rewind.zh.md | 16 ++++---
+ docs/persistence-catalog.i18n.yaml            |  4 +-
+ docs/persistence-catalog.md                   |  2 +-
+ docs/persistence-catalog.zh.md                |  2 +-
+ docs/subsystems/session.i18n.yaml             |  4 +-
+ docs/subsystems/session.md                    | 45 ++++++++++++++-----
+ docs/subsystems/session.zh.md                 | 45 ++++++++++++++-----
+ packages/core/session/src/index.ts            | 30 ++++++++-----
+ packages/core/session/src/types.ts            | 16 +++++++
+ packages/core/session/tests/session.spec.ts   | 25 +++++++++++
+ scripts/type-equiv.manifest.json              |  5 +++
+ 13 files changed, 162 insertions(+), 52 deletions(-)
+
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+index 0fb1177..9963f8c 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+-2026-08-17-trajectory-control-and-in-place-rewind.md: e65dfd2891afd2064c1ffe642bf8cf77f97d45c7
+-2026-08-17-trajectory-control-and-in-place-rewind.zh.md: ddd078e42f863e11fdbb6e670d6d1992be993317
++2026-08-17-trajectory-control-and-in-place-rewind.md: 0380c590a9e7e43c7a33501b4bf4498d2d1a1c75
++2026-08-17-trajectory-control-and-in-place-rewind.zh.md: 3197f38b6b65939b36fb1c3746789aa2567693bf
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+index e65dfd2..0380c59 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+@@ -34,17 +34,19 @@ The [session-log version mechanism note](../../implemented/architecture/2026-08-
+ 
+ ### T-1: two prerequisites, each an independent change
+ 
+-**1. A writer surface for `ignorable` on `Session.append`.** The field exists on the event envelope (`packages/core/session/src/types.ts:422`) and is honored by seed validation, both persistence backends, and the BFF wire schema — but no writer can set it. `Session.append`'s only optional parameter is `SurfaceIntent` (`surfaceOp` + `sourceEventSeqs`), and the envelope is constructed without the field (`packages/core/session/src/index.ts:626`). Consequently **every new event type is required-on-read today**, and an older build refuses the whole session on encountering one.
++**1. A writer surface for `ignorable` on `Session.append`.** The field exists on the event envelope and is honored by seed validation, both persistence backends, and the BFF wire schema, but before this change no writer could set it: `append`'s only optional parameter was `SurfaceIntent`, and the envelope was constructed without the field. Every new event type was therefore required-on-read, and an older build refused the whole session on encountering one.
+ 
+ The version-mechanism note anticipates this exact change: *"writers do not yet set `ignorable` (no producer needs it), so `Session.append` gains that surface with its first user."* Trajectory control is that first user.
+ 
+-The interface question this raises must be settled before implementation: `SurfaceIntent` is reachable only for the three `SurfaceEventType` variants (`index.ts:604` makes the parameter conditional on the event type), so it is the wrong carrier — `trajectory/annotation` is a non-surface event and could not pass a value through it. The choice is between a fourth `append` parameter and a separate options object for non-surface events. This affects every future producer, not only this feature.
++**This item has shipped.** `SurfaceIntent` was the wrong carrier — it is reachable only for the three `SurfaceEventType` variants, because `append` makes its options parameter conditional on the event type, so a non-surface event like `trajectory/annotation` could never pass a value through it. The options parameter now selects one of two disjoint types by event class: a `SurfaceEventType` requires `SurfaceIntent` as before, and every other type accepts an optional `LogIntent` carrying `ignorable`.
+ 
+-Adding the writer surface does not bump `SESSION_FORMAT_VERSION`: the field is already part of the envelope.
++Disjoint types rather than one merged object make two mistakes unrepresentable instead of merely discouraged: the compiler rejects a surface placement on a log-only event, and rejects an `ignorable` marker on a message-producing one. The second is the load-bearing half — a surface event is always a recognized, model-visible type, so skipping one could never be safe, and a shared options object would have left that expressible.
++
++`SESSION_FORMAT_VERSION` stays at `0`: the field was already part of the envelope, and this change only supplies the missing producer.
+ 
+ **2. A fallback renderer for unrecognized surface replacements.** The conversation view identifies replacements by hardcoded plugin name:
+ 
+-```ts
++```text
+ // packages/client/ui-conversation/src/client/conversation-nodes/message.ts:25-28
+ if (event.type !== 'user/message' || !isReplacementSurfaceEvent(event)) return false
+ const source = event.data.source
+@@ -108,7 +110,7 @@ Pre-step "park" — holding a step while a human decides — is feasible: `agent
+ 
+ | Stage | Content |
+ |---|---|
+-| **T-1** | `ignorable` writer surface; replacement fallback renderer (**shipped**) |
++| **T-1** | `ignorable` writer surface (**shipped**); replacement fallback renderer (**shipped**) |
+ | **T0** | Live pause/resume; trajectory row actions reusing the existing `forkAt`; steer/queue insertion form; pause banner |
+ | **T1** | Annotations; lineage panel over `traceSession`; in-place rewind; instruction-only approval editing |
+ | **T2** | Breakpoint park; automatic error pause; side-effect inventory; trajectory diff; branch exploration |
+@@ -122,6 +124,8 @@ Exploration limits are validated `Config` fields changeable from `cordis.yml`, n
+ 
+ **A dynamic Cordis plugin.** Rejected as the delivery form: new session events would be refused on the next load, `RpcMethodMap` admits no merge, and the conversation-view fix is inside an existing package. Retained only as a prototyping path for the T0 subset that adds no event and no RPC.
+ 
++**One merged options object carrying `surfaceOp`, `sourceEventSeqs`, and `ignorable`.** Rejected for the `append` writer surface: it would let a caller mark a message-producing event ignorable, and a surface event is always a recognized model-visible type, so a reader skipping one would silently drop model context. Two disjoint types make that unrepresentable instead of merely discouraged, and they also reject a surface placement on a log-only event. A fourth positional parameter was the other candidate; it keeps the same guarantee but leaves `append` with two options parameters whose valid combinations are implicit.
++
+ **A new `SurfaceOp` variant for anchor-to-tail shadowing** (the prior revision's plan). Rejected because the capability already exists, the three-key `isReplaceOp` check rejects added fields, and `SurfaceOp` changes fall under the version-bump rule — paying a durable-format cost for nothing.
+ 
+ **"Invisible fork" as an in-place-rollback stand-in** — fork internally and swap the visible session card. Rejected once real replace semantics were confirmed available: it leaves branch lineage that misrepresents what the user did, and it was only ever justified by the surface constraint that turned out not to exist.
+@@ -146,7 +150,7 @@ Exploration limits are validated `Config` fields changeable from `cordis.yml`, n
+ 
+ ## Risks
+ 
+-**The `ignorable` writer surface touches `packages/core/session`,** which every append path depends on. The change is additive and does not alter existing call sites, but the interface choice is durable and should be reviewed on its own rather than inside a feature PR.
++**The `ignorable` writer surface touches `packages/core/session`,** which every append path depends on. It is additive: the surface-event arm of the options parameter is unchanged, a log-only event still accepts no options at all, and no existing call site moved. The durable part is the two-type split, which is why it landed as its own change rather than inside a feature PR.
+ 
+ **In-place rewind is irreversible from the user's perspective** even though the log retains everything: after a rewind, model context no longer contains the shadowed turns. The shadowed events stay auditable, which is what makes this acceptable.
+ 
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+index ddd078e..3197f38 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+@@ -34,17 +34,19 @@ Trajectory 视图是会话事件流的被动回放。用户看着 agent 走错
+ 
+ ### T-1：两项前置，各为独立改动
+ 
+-**1. `Session.append` 的 `ignorable` 写入面。** 该字段存在于事件 envelope（`packages/core/session/src/types.ts:422`），并已被 seed 校验、两个持久化后端与 BFF wire schema 认可——但没有任何写入方能设置它。`Session.append` 唯一的可选参数是 `SurfaceIntent`（`surfaceOp` + `sourceEventSeqs`），构造 envelope 时不写该字段（`packages/core/session/src/index.ts:626`）。因此**今天任何新事件类型都是 required-on-read**，旧构建遇到其一即拒绝整条会话。
++**1. `Session.append` 的 `ignorable` 写入面。** 该字段存在于事件 envelope，并已被 seed 校验、两个持久化后端与 BFF wire schema 认可，但在此改动之前没有任何写入方能设置它：`append` 唯一的可选参数是 `SurfaceIntent`，构造 envelope 时不写该字段。因此任何新事件类型都是 required-on-read，旧构建遇到其一即拒绝整条会话。
+ 
+ 版本机制 note 恰好预留了这一改动：*"writers do not yet set `ignorable` (no producer needs it), so `Session.append` gains that surface with its first user."* 轨迹控制就是那个 first user。
+ 
+-由此引出的接口问题必须在实现前定下：`SurfaceIntent` 仅对三种 `SurfaceEventType` 变体可达（`index.ts:604` 使该参数以事件类型为条件），因此它是错误的载体——`trajectory/annotation` 是非 surface 事件，无法通过它传值。选择在于给 `append` 增加第四个参数，还是为非 surface 事件另设一个 options 对象。这影响所有未来的生产者，不只本功能。
++**本项已交付。** `SurfaceIntent` 是错误的载体——它仅对三种 `SurfaceEventType` 变体可达，因为 `append` 使其 options 参数以事件类型为条件，故 `trajectory/annotation` 这类非 surface 事件永远无法通过它传值。现在该 options 参数按事件类别在两个互斥类型之间取一：`SurfaceEventType` 一如既往要求 `SurfaceIntent`，其余类型接受可选的、承载 `ignorable` 的 `LogIntent`。
+ 
+-增加写入面**不** bump `SESSION_FORMAT_VERSION`：该字段已属 envelope 的一部分。
++采用互斥类型而非单一合并对象，使两类错误不可表达而非仅仅不被鼓励：编译器拒绝仅日志事件声明 surface 位置，也拒绝产生消息的事件标记 `ignorable`。后者是承重的一半——surface 事件永远是被识别的、模型可见的类型，跳过它不可能安全，而共享 options 对象会让这种写法仍然可表达。
++
++`SESSION_FORMAT_VERSION` 保持为 `0`：该字段已属 envelope 的一部分，本改动只是补上缺失的生产者。
+ 
+ **2. 未识别 surface replacement 的兜底渲染器。** conversation 视图靠硬编码插件名识别 replacement：
+ 
+-```ts
++```text
+ // packages/client/ui-conversation/src/client/conversation-nodes/message.ts:25-28
+ if (event.type !== 'user/message' || !isReplacementSurfaceEvent(event)) return false
+ const source = event.data.source
+@@ -108,7 +110,7 @@ pre-step "park"——在人类决定期间挂住一步——是可行的：`agen
+ 
+ | 阶段 | 内容 |
+ |---|---|
+-| **T-1** | `ignorable` 写入面；replacement 兜底渲染器（**已交付**） |
++| **T-1** | `ignorable` 写入面（**已交付**）；replacement 兜底渲染器（**已交付**） |
+ | **T0** | 实时暂停/恢复；复用既有 `forkAt` 的轨迹行操作；steer/queue 插入表单；暂停横幅 |
+ | **T1** | 标注；基于 `traceSession` 的血缘面板；原地回滚；仅限指令的审批编辑 |
+ | **T2** | 断点 park；错误自动暂停；副作用清单；轨迹 diff；分支探索 |
+@@ -122,6 +124,8 @@ T0 比上一版设想的更小：`forkAt(seq)` 已经交付，且已挂载为 tu
+ 
+ **动态 Cordis 插件。** 作为交付形态被否决：新增会话事件会在下次加载时被拒绝，`RpcMethodMap` 不接受合并，且 conversation 视图的修复位于既有 package 内部。仅保留为 T0 中不增事件、不增 RPC 那部分的原型验证路径。
+ 
++**用一个合并的 options 对象同时承载 `surfaceOp`、`sourceEventSeqs` 与 `ignorable`。** 在 `append` 写入面上被否决：它会允许调用方把产生消息的事件标记为 ignorable，而 surface 事件永远是被识别的、模型可见的类型，读取方跳过它会静默丢失模型上下文。两个互斥类型使该写法不可表达，而非仅仅不被鼓励，同时也拒绝仅日志事件声明 surface 位置。另一个候选是增加第四个位置参数；它能保持同样的保证，但会让 `append` 有两个 options 参数，其合法组合只能靠隐式约定。
++
+ **为锚点到尾部的遮蔽新增 `SurfaceOp` 变体**（上一版的计划）。被否决：该能力已存在，三键的 `isReplaceOp` 校验会拒绝新增字段，且 `SurfaceOp` 改动落在版本 bump 规则之内——为无所得付出持久化格式代价。
+ 
+ **以"隐形 fork"替代原地回滚** —— 内部 fork 并切换可见的会话卡片。在确认真 replace 语义可用后被否决：它留下的分支血缘会误述用户的实际操作，而其唯一理由是那个后来证明并不存在的 surface 约束。
+@@ -146,7 +150,7 @@ T0 比上一版设想的更小：`forkAt(seq)` 已经交付，且已挂载为 tu
+ 
+ ## Risks
+ 
+-**`ignorable` 写入面触及 `packages/core/session`**，每条 append 路径都依赖它。该改动是追加式的、不改变现有调用点，但接口选择具有长期性，应单独评审而非夹在功能 PR 内。
++**`ignorable` 写入面触及 `packages/core/session`**，每条 append 路径都依赖它。该改动是追加式的：options 参数中 surface 事件的那一支未变，仅日志事件仍可完全不传 options，且没有任何现有调用点移动。具有长期性的部分是两个类型的拆分，这也是它作为独立改动落地、而非夹在功能 PR 内的原因。
+ 
+ **从用户视角看原地回滚不可逆**，尽管日志保留了一切：回滚后模型上下文不再包含被遮蔽的 turn。被遮蔽事件仍可审计，这正是该方案可接受的原因。
+ 
+diff --git a/docs/persistence-catalog.i18n.yaml b/docs/persistence-catalog.i18n.yaml
+index bc6e3dd..18eec51 100644
+--- a/docs/persistence-catalog.i18n.yaml
++++ b/docs/persistence-catalog.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write docs/persistence-catalog.md
+-persistence-catalog.md: c400298f7d37c590918820bcbda10e6550f197e8
+-persistence-catalog.zh.md: 65ec0e3fbdd226c51a371dc9a90f10db5c929c7a
++persistence-catalog.md: f2c02cd4e62a504907f7a5ce8d7ac819e8e9c313
++persistence-catalog.zh.md: 96a3fdfce01b14c52f48f4da733841b377cc1c02
+diff --git a/docs/persistence-catalog.md b/docs/persistence-catalog.md
+index c400298..f2c02cd 100644
+--- a/docs/persistence-catalog.md
++++ b/docs/persistence-catalog.md
+@@ -90,7 +90,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
+ }[T]
+ ```
+ 
+-Sources: [`packages/core/session/src/types.ts:336`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:343`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:372`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:404`](../packages/core/session/src/types.ts)
++Sources: [`packages/core/session/src/types.ts:336`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:343`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:372`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:420`](../packages/core/session/src/types.ts)
+ 
+ ## Events
+ 
+diff --git a/docs/persistence-catalog.zh.md b/docs/persistence-catalog.zh.md
+index 65ec0e3..96a3fdf 100644
+--- a/docs/persistence-catalog.zh.md
++++ b/docs/persistence-catalog.zh.md
+@@ -92,7 +92,7 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
+ }[T]
+ ```
+ 
+-来源：[`packages/core/session/src/types.ts:336`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:343`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:372`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:404`](../packages/core/session/src/types.ts)
++来源：[`packages/core/session/src/types.ts:336`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:343`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:372`](../packages/core/session/src/types.ts) · [`packages/core/session/src/types.ts:420`](../packages/core/session/src/types.ts)
+ 
+ ## 事件
+ 
+diff --git a/docs/subsystems/session.i18n.yaml b/docs/subsystems/session.i18n.yaml
+index 1c33960..8cea46f 100644
+--- a/docs/subsystems/session.i18n.yaml
++++ b/docs/subsystems/session.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write docs/subsystems/session.md
+-session.md: aea9d00b38e384e7a973ce168c3a75a62e70a8bb
+-session.zh.md: 8c56029af5144569f1ab6df73a8fe2278f9ef5b4
++session.md: e1953c55f3d936aa16c1c3d1b6f5da6d2858a585
++session.zh.md: 42eeb021a5da51060321118007ee0b3e819edbf2
+diff --git a/docs/subsystems/session.md b/docs/subsystems/session.md
+index aea9d00..e1953c5 100644
+--- a/docs/subsystems/session.md
++++ b/docs/subsystems/session.md
+@@ -312,6 +312,28 @@ Required for `SurfaceEventType` events — every message-producing event must de
+ 
+ Only `assistant/message` may carry a present empty `sourceEventSeqs`; when the field is absent, the event does not record which earlier events produced the message, and the provider may still have emitted chunks.
+ 
++### `LogIntent` — the log-only counterpart
++
++```ts type-equiv
++/**
++ * Reader-compatibility declaration for a log-only event in {@link Session.append}.
++ * Optional on log-only events and unavailable on message-producing ones: a
++ * {@link SurfaceEventType} is always recognized by any reader and is
++ * model-visible, so skipping one could never be safe.
++ */
++interface LogIntent {
++  /**
++   * Set `true` only on a purely informational record whose loss cannot affect
++   * reconstruction, marking it skippable by a reader that does not recognize
++   * its type. Omission means required, which is the safe default: see
++   * {@link SessionEvent.ignorable} for the full envelope contract.
++   */
++  ignorable?: true
++}
++```
++
++The two option types are disjoint by event class, so the compiler admits neither a surface placement on a log-only event nor an `ignorable` marker on a message-producing one. Omission keeps an event required on read, and a reader meeting an unrecognized required type refuses the log rather than reconstructing a session missing an event that may change how the rest is interpreted.
++
+ ### `SessionSurface` — the live readonly surface projection
+ 
+ `Session.surface` returns the session's stable `SessionSurface` view. The same incremental manager validates append candidates before commit and advances this projection from committed events; callers can observe membership and replacement generation but cannot invoke validation.
+@@ -444,14 +466,17 @@ declare class Session {
+    *
+    * @param type - The event type (key of {@link SessionEventMap}).
+    * @param data - The event payload; must be JSON-serializable.
+-   * @param opts - Surface metadata: `surfaceOp` controls how the event enters
+-   *   the ordered surface; `sourceEventSeqs` lists the seq numbers of earlier
+-   *   events this one derives from. REQUIRED for
+-   *   {@link SurfaceEventType} events (every message-producing event must
+-   *   declare how it joins the surface, the sole source of derived model
+-   *   history) and
+-   *   rejected by the compiler for non-surface types like `turn/start` or
+-   *   `assistant/chunk`.
++   * @param opts - Placement metadata, and which type it accepts depends on the
++   *   event. A {@link SurfaceEventType} REQUIRES a {@link SurfaceIntent}:
++   *   `surfaceOp` controls how the event enters the ordered surface and
++   *   `sourceEventSeqs` lists the earlier events it derives from (every
++   *   message-producing event must declare how it joins the surface, the sole
++   *   source of derived model history). Every other type accepts an optional
++   *   {@link LogIntent}, whose `ignorable` marks the record skippable by a
++   *   reader that does not recognize its type. The compiler keeps each side to
++   *   its own options: a log-only type cannot declare surface placement, and a
++   *   surface event cannot be marked ignorable, because it is always a
++   *   recognized model-visible type.
+    * @returns the logged event — its assigned `seq`/`time` plus the SNAPSHOT of
+    *   `data` that entered the log, so reading `event.data` back sees the logged
+    *   value, never the caller's still-mutable input.
+@@ -472,7 +497,7 @@ declare class Session {
+   append<T extends SessionEventType>(
+     type: T,
+     data: SessionEventMap[T],
+-    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent] : []
++    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent] : [opts?: LogIntent]
+   ): SessionEvent<T>;
+   /**
+    * The {@link EpochHeader} in force after the log's last header event — the
+@@ -746,7 +771,7 @@ fork(source: SessionForkSource, boundary?: number, childSessionId?: SessionId):
+ 
+ Types: [CreateSessionOptions](persistence.md) · [PrepareSessionOptions](persistence.md) · [SessionId](core.md)
+ 
+-Source: [`packages/core/session/src/index.ts:792`](../../packages/core/session/src/index.ts)
++Source: [`packages/core/session/src/index.ts:798`](../../packages/core/session/src/index.ts)
+ 
+ <a id="session-events"></a>
+ 
+diff --git a/docs/subsystems/session.zh.md b/docs/subsystems/session.zh.md
+index 8c56029..42eeb02 100644
+--- a/docs/subsystems/session.zh.md
++++ b/docs/subsystems/session.zh.md
+@@ -312,6 +312,28 @@ interface SurfaceIntent {
+ 
+ 只有 `assistant/message` 可以携带存在但为空的 `sourceEventSeqs`；字段不存在时，该事件没有记录这条消息由哪些早期事件产生，但提供方仍可能发出过分片。
+ 
++### `LogIntent`：仅日志事件的对应参数
++
++```ts type-equiv
++/**
++ * Reader-compatibility declaration for a log-only event in {@link Session.append}.
++ * Optional on log-only events and unavailable on message-producing ones: a
++ * {@link SurfaceEventType} is always recognized by any reader and is
++ * model-visible, so skipping one could never be safe.
++ */
++interface LogIntent {
++  /**
++   * Set `true` only on a purely informational record whose loss cannot affect
++   * reconstruction, marking it skippable by a reader that does not recognize
++   * its type. Omission means required, which is the safe default: see
++   * {@link SessionEvent.ignorable} for the full envelope contract.
++   */
++  ignorable?: true
++}
++```
++
++两个选项类型按事件类别互斥，因此编译器既不接受仅日志事件声明 surface 位置，也不接受产生消息的事件标记 `ignorable`。省略该标记意味着事件在读取时为必需，这是安全的默认：读取方遇到无法识别的必需类型会拒绝该日志，而不是重建一个缺少某个可能改变其余日志解释方式的事件的会话。
++
+ ### `SessionSurface`：实时只读 surface 投影
+ 
+ `Session.surface` 返回会话稳定的 `SessionSurface` 视图。同一个增量管理器在提交前校验追加候选事件，并根据已提交事件推进该投影；调用方可以观察成员关系和替换代次，但不能调用校验。
+@@ -444,14 +466,17 @@ declare class Session {
+    *
+    * @param type - The event type (key of {@link SessionEventMap}).
+    * @param data - The event payload; must be JSON-serializable.
+-   * @param opts - Surface metadata: `surfaceOp` controls how the event enters
+-   *   the ordered surface; `sourceEventSeqs` lists the seq numbers of earlier
+-   *   events this one derives from. REQUIRED for
+-   *   {@link SurfaceEventType} events (every message-producing event must
+-   *   declare how it joins the surface, the sole source of derived model
+-   *   history) and
+-   *   rejected by the compiler for non-surface types like `turn/start` or
+-   *   `assistant/chunk`.
++   * @param opts - Placement metadata, and which type it accepts depends on the
++   *   event. A {@link SurfaceEventType} REQUIRES a {@link SurfaceIntent}:
++   *   `surfaceOp` controls how the event enters the ordered surface and
++   *   `sourceEventSeqs` lists the earlier events it derives from (every
++   *   message-producing event must declare how it joins the surface, the sole
++   *   source of derived model history). Every other type accepts an optional
++   *   {@link LogIntent}, whose `ignorable` marks the record skippable by a
++   *   reader that does not recognize its type. The compiler keeps each side to
++   *   its own options: a log-only type cannot declare surface placement, and a
++   *   surface event cannot be marked ignorable, because it is always a
++   *   recognized model-visible type.
+    * @returns the logged event — its assigned `seq`/`time` plus the SNAPSHOT of
+    *   `data` that entered the log, so reading `event.data` back sees the logged
+    *   value, never the caller's still-mutable input.
+@@ -472,7 +497,7 @@ declare class Session {
+   append<T extends SessionEventType>(
+     type: T,
+     data: SessionEventMap[T],
+-    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent] : []
++    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent] : [opts?: LogIntent]
+   ): SessionEvent<T>;
+   /**
+    * The {@link EpochHeader} in force after the log's last header event — the
+@@ -748,7 +773,7 @@ fork(source: SessionForkSource, boundary?: number, childSessionId?: SessionId):
+ 
+ Types: [CreateSessionOptions](persistence.md) · [PrepareSessionOptions](persistence.md) · [SessionId](core.md)
+ 
+-Source: [`packages/core/session/src/index.ts:792`](../../packages/core/session/src/index.ts)
++Source: [`packages/core/session/src/index.ts:798`](../../packages/core/session/src/index.ts)
+ 
+ <a id="session-events"></a>
+ 
+diff --git a/packages/core/session/src/index.ts b/packages/core/session/src/index.ts
+index 2d82a88..6c1255c 100644
+--- a/packages/core/session/src/index.ts
++++ b/packages/core/session/src/index.ts
+@@ -14,7 +14,7 @@ import type { Scoped } from '@deepseek-ai/dsh-scope'
+ import type { Message } from '@deepseek-ai/dsh-llm'
+ import { SESSION_FORMAT_VERSION, SessionId } from './types.ts'
+ import type { TypertLookup } from '@deepseek-ai/dsh-typert-protocol'
+-import type { CreateSessionOptions, EpochHeader, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SurfaceIntent, SurfaceEventType } from './types.ts'
++import type { CreateSessionOptions, EpochHeader, LogIntent, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SurfaceIntent, SurfaceEventType } from './types.ts'
+ import { snapshotJsonValue } from './json.ts'
+ import { deriveEventMessage, SurfaceManager } from './surface.ts'
+ import type { SessionSurface } from './surface.ts'
+@@ -576,14 +576,17 @@ export class Session {
+    *
+    * @param type - The event type (key of {@link SessionEventMap}).
+    * @param data - The event payload; must be JSON-serializable.
+-   * @param opts - Surface metadata: `surfaceOp` controls how the event enters
+-   *   the ordered surface; `sourceEventSeqs` lists the seq numbers of earlier
+-   *   events this one derives from. REQUIRED for
+-   *   {@link SurfaceEventType} events (every message-producing event must
+-   *   declare how it joins the surface, the sole source of derived model
+-   *   history) and
+-   *   rejected by the compiler for non-surface types like `turn/start` or
+-   *   `assistant/chunk`.
++   * @param opts - Placement metadata, and which type it accepts depends on the
++   *   event. A {@link SurfaceEventType} REQUIRES a {@link SurfaceIntent}:
++   *   `surfaceOp` controls how the event enters the ordered surface and
++   *   `sourceEventSeqs` lists the earlier events it derives from (every
++   *   message-producing event must declare how it joins the surface, the sole
++   *   source of derived model history). Every other type accepts an optional
++   *   {@link LogIntent}, whose `ignorable` marks the record skippable by a
++   *   reader that does not recognize its type. The compiler keeps each side to
++   *   its own options: a log-only type cannot declare surface placement, and a
++   *   surface event cannot be marked ignorable, because it is always a
++   *   recognized model-visible type.
+    * @returns the logged event — its assigned `seq`/`time` plus the SNAPSHOT of
+    *   `data` that entered the log, so reading `event.data` back sees the logged
+    *   value, never the caller's still-mutable input.
+@@ -604,12 +607,15 @@ export class Session {
+   append<T extends SessionEventType>(
+     type: T,
+     data: SessionEventMap[T],
+-    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent] : []
++    ...opts: T extends SurfaceEventType ? [opts: SurfaceIntent] : [opts?: LogIntent]
+   ): SessionEvent<T> {
+-    const surfaceOpts: SurfaceIntent | undefined = opts[0]
++    const intent: SurfaceIntent | LogIntent | undefined = opts[0]
++    const surfaceOpts = intent as SurfaceIntent | undefined
++    const logOpts = intent as LogIntent | undefined
+     const surfaceMetadata = {
+       ...surfaceOpts?.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: surfaceOpts.sourceEventSeqs },
+       ...surfaceOpts?.surfaceOp === undefined ? {} : { surfaceOp: surfaceOpts.surfaceOp },
++      ...logOpts?.ignorable === undefined ? {} : { ignorable: logOpts.ignorable },
+     }
+     const dataSnapshot = snapshotJsonValue(data)
+     if (dataSnapshot === undefined) {
+@@ -629,7 +635,7 @@ export class Session {
+       seq: this.log.length,
+       time: Date.now(),
+       data: dataSnapshot,
+-      ...(surfaceMetadataSnapshot as { surfaceOp?: unknown; sourceEventSeqs?: unknown }),
++      ...(surfaceMetadataSnapshot as { surfaceOp?: unknown; sourceEventSeqs?: unknown; ignorable?: true }),
+     } as unknown as SessionEvent<T>)
+     this.surfaceManager.validateNext(event as SessionEvent)
+ 
+diff --git a/packages/core/session/src/types.ts b/packages/core/session/src/types.ts
+index 17aacd1..8fe62b4 100644
+--- a/packages/core/session/src/types.ts
++++ b/packages/core/session/src/types.ts
+@@ -388,6 +388,22 @@ export interface SurfaceIntent {
+   sourceEventSeqs?: number[]
+ }
+ 
++/**
++ * Reader-compatibility declaration for a log-only event in {@link Session.append}.
++ * Optional on log-only events and unavailable on message-producing ones: a
++ * {@link SurfaceEventType} is always recognized by any reader and is
++ * model-visible, so skipping one could never be safe.
++ */
++export interface LogIntent {
++  /**
++   * Set `true` only on a purely informational record whose loss cannot affect
++   * reconstruction, marking it skippable by a reader that does not recognize
++   * its type. Omission means required, which is the safe default: see
++   * {@link SessionEvent.ignorable} for the full envelope contract.
++   */
++  ignorable?: true
++}
++
+ /**
+  * One immutable entry in the session log.
+  *
+diff --git a/packages/core/session/tests/session.spec.ts b/packages/core/session/tests/session.spec.ts
+index 47453ea..a2429c9 100644
+--- a/packages/core/session/tests/session.spec.ts
++++ b/packages/core/session/tests/session.spec.ts
+@@ -1088,6 +1088,31 @@ describe('Session', () => {
+     ])
+     expect(marked.events[0]?.ignorable).toBe(true)
+   })
++
++  it('marks a log-only append ignorable and leaves an unmarked one required', () => {
++    const session = Session.create(SessionId('ignorable-append'))
++
++    session.append('todo/write', { todos: [] }, { ignorable: true })
++    session.append('turn/start', { turn: 1 })
++
++    const [marked, required] = session.events
++    expect(marked?.ignorable).toBe(true)
++    // Absent rather than `false`: `true` is the envelope's only accepted marker
++    // value, so an unmarked event carries no field at all.
++    expect(Object.hasOwn(required!, 'ignorable')).toBe(false)
++    // The marker survives a round trip through seed validation.
++    const reseeded = Session.create(SessionId('ignorable-reseed'), [...session.events])
++    expect(reseeded.events[0]?.ignorable).toBe(true)
++  })
++
++  it('keeps an ignorable log-only append off the surface', () => {
++    const session = Session.create(SessionId('ignorable-surface'))
++
++    session.append('todo/write', { todos: [] }, { ignorable: true })
++
++    expect(session.surface.nodes).toEqual([])
++    expect(session.deriveMessages()).toEqual([])
++  })
+ })
+ 
+ 
+diff --git a/scripts/type-equiv.manifest.json b/scripts/type-equiv.manifest.json
+index 5e6184b..7454896 100644
+--- a/scripts/type-equiv.manifest.json
++++ b/scripts/type-equiv.manifest.json
+@@ -458,6 +458,11 @@
+       "symbol": "SurfaceIntent",
+       "source": "packages/core/session/src/types.ts"
+     },
++    {
++      "doc": "docs/subsystems/session.md",
++      "symbol": "LogIntent",
++      "source": "packages/core/session/src/types.ts"
++    },
+     {
+       "doc": "docs/subsystems/session.md",
+       "symbol": "SessionSurface",
+-- 
+2.51.0
+

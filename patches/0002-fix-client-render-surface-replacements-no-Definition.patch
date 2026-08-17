@@ -1,0 +1,344 @@
+From 590ec23d1d45b66374265be8dfffebae0d24a9c5 Mon Sep 17 00:00:00 2001
+From: Kissshot <ttyinzg@gmail.com>
+Date: Mon, 17 Aug 2026 11:46:49 +0800
+Subject: [PATCH 2/3] fix(client): render surface replacements no Definition
+ claims
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+An unclaimed surface replacement rendered as nothing in the chat view.
+The message Definition matches append-origin events plus compaction's own
+checkpoint, identified by hardcoded plugin name, and the sole fallback
+matched append origin only, so a user/message replacement from any other
+producer was claimed by no Definition and caught by no fallback.
+
+Extend that one fallback instead of adding a second: the registry admits
+exactly one and throws on a duplicate, and the assembler consults it only
+when no ordinary Definition claimed the target. UnknownSurfaceNode gains
+an optional replaced list of shadowed seqs, read from sourceEventSeqs,
+and the renderer reports the shadowed history rather than presenting the
+replacement as an ordinary message — a landed replacement must not erase
+a transcript the reader already saw.
+
+Append-origin fallback stays unreachable through an assembled window
+because all three SurfaceEventType members have owning Definitions, so
+that arm is asserted at the Definition level.
+---
+ ...tory-control-and-in-place-rewind.i18n.yaml |  4 +-
+ ...-trajectory-control-and-in-place-rewind.md |  8 ++-
+ ...ajectory-control-and-in-place-rewind.zh.md |  8 ++-
+ .../src/client/sessions/conversation.ts       | 14 ++--
+ .../src/client/chat/MessageItem.tsx           |  7 +-
+ .../src/client/conversation-nodes/fallback.ts | 28 ++++++--
+ .../ui-conversation/src/client/locales.ts     |  2 +
+ .../tests/chat-branch-tails.client.spec.tsx   | 15 +++++
+ ...nversation-node-definitions.client.spec.ts | 67 +++++++++++++++++++
+ 9 files changed, 137 insertions(+), 16 deletions(-)
+
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+index 5d1c1bb..0fb1177 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+-2026-08-17-trajectory-control-and-in-place-rewind.md: 63673ebef9a9aa7a954bffde083399f5223e9540
+-2026-08-17-trajectory-control-and-in-place-rewind.zh.md: 4813e02b4518f1a62ed487c45d6ea41356ffd53e
++2026-08-17-trajectory-control-and-in-place-rewind.md: e65dfd2891afd2064c1ffe642bf8cf77f97d45c7
++2026-08-17-trajectory-control-and-in-place-rewind.zh.md: ddd078e42f863e11fdbb6e670d6d1992be993317
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+index 63673eb..e65dfd2 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+@@ -53,7 +53,11 @@ return source.kind === 'plugin' && source.plugin === 'compact'
+ 
+ `command.ts:83` applies the same `plugin === COMPACT_PLUGIN` test, and the generic fallback matches only `isAppendSurfaceEvent` (`conversation-nodes/fallback.ts:19`). A `user/message` replacement from any other producer is therefore claimed by no definition and caught by no fallback: **it renders as nothing.** In-place rewind produces exactly that event shape.
+ 
+-The fix is a replacement-side fallback definition symmetric to `unknownFallbackDefinition`. It is independent of this feature and removes a standing hazard for any future replacement producer. It must render a marker that history was shadowed at that point — not omit the content — because `isAppendSurfaceEvent` exists precisely so a human transcript is not erased by a landed replacement (`packages/core/session/src/surface.ts:44-47`).
++**This item has shipped**, and it landed as an extension of the existing fallback rather than a second one: `ConversationEventRegistry.registerFallback` admits exactly one fallback and throws on a duplicate, and the assembler consults it only when no ordinary Definition claimed the target (`packages/client/runtime/src/client/conversation/event-registry.ts:34-50`, `sessions/conversation-assembler.ts:376-383`). So `unknownFallbackDefinition` now matches both surface origins, and `UnknownSurfaceNode` carries an optional `replaced` list of shadowed seqs, taken from `sourceEventSeqs` — a superset of the shadowed nodes, since core requires that field to include every shadowed node while a producer may cite further sources.
++
++The node reports shadowed history rather than omitting content, because `isAppendSurfaceEvent` exists precisely so a landed replacement does not erase a transcript the user already read (`packages/core/session/src/surface.ts:44-47`). The Trajectory view needs no counterpart: its message Definition matches `user/message` regardless of surface origin, so a replacement was never dropped there.
++
++Append-origin fallback remains unreachable through an assembled window — all three `SurfaceEventType` members have owning Definitions — so that arm is covered at the Definition level and stays a degradation path for a core-side widening of the type set.
+ 
+ ### In-place rewind needs no surface-mechanism change
+ 
+@@ -104,7 +108,7 @@ Pre-step "park" — holding a step while a human decides — is feasible: `agent
+ 
+ | Stage | Content |
+ |---|---|
+-| **T-1** | `ignorable` writer surface; replacement fallback renderer |
++| **T-1** | `ignorable` writer surface; replacement fallback renderer (**shipped**) |
+ | **T0** | Live pause/resume; trajectory row actions reusing the existing `forkAt`; steer/queue insertion form; pause banner |
+ | **T1** | Annotations; lineage panel over `traceSession`; in-place rewind; instruction-only approval editing |
+ | **T2** | Breakpoint park; automatic error pause; side-effect inventory; trajectory diff; branch exploration |
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+index 4813e02..ddd078e 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+@@ -53,7 +53,11 @@ return source.kind === 'plugin' && source.plugin === 'compact'
+ 
+ `command.ts:83` 使用同样的 `plugin === COMPACT_PLUGIN` 判断，而通用 fallback 只匹配 `isAppendSurfaceEvent`（`conversation-nodes/fallback.ts:19`）。因此来自任何其他生产者的 `user/message` replacement 既无 definition 认领、也无 fallback 兜住：**它渲染为空白。** 原地回滚产生的正是这种事件形状。
+ 
+-修复方式是补一条与 `unknownFallbackDefinition` 对称的 replacement 侧兜底 definition。它独立于本功能，并消除了任何未来 replacement 生产者面临的长期隐患。它必须渲染出"此处历史已被遮蔽"的标记，而**不是**省略内容——`isAppendSurfaceEvent` 存在的理由正是避免已落地的 replacement 抹掉人类转录（`packages/core/session/src/surface.ts:44-47`）。
++**本项已交付**，且落地方式是扩展既有兜底而非新增第二个：`ConversationEventRegistry.registerFallback` 只接受一个兜底，重复注册会抛错；assembler 仅在没有任何普通 Definition 认领该 target 时才咨询它（`packages/client/runtime/src/client/conversation/event-registry.ts:34-50`、`sessions/conversation-assembler.ts:376-383`）。因此 `unknownFallbackDefinition` 现在同时匹配两种 surface 来源，`UnknownSurfaceNode` 携带可选的 `replaced` 被遮蔽 seq 列表，取自 `sourceEventSeqs`——它是被遮蔽节点的超集，因为核心要求该字段包含每一个被遮蔽节点，而生产者可以额外引用其他来源。
++
++该节点报告历史已被遮蔽，而非省略内容，因为 `isAppendSurfaceEvent` 存在的理由正是避免已落地的 replacement 抹掉用户已读过的转录（`packages/core/session/src/surface.ts:44-47`）。Trajectory 视图无需对应改动：其 message Definition 不分 surface 来源地匹配 `user/message`，故 replacement 在那里从未被丢弃。
++
++append 来源的兜底在装配窗口中仍不可达——三种 `SurfaceEventType` 成员都有各自的 Definition——故该分支在 Definition 层面覆盖，并保留为核心侧扩大该类型集时的降级路径。
+ 
+ ### 原地回滚无需改动 surface 机制
+ 
+@@ -104,7 +108,7 @@ pre-step "park"——在人类决定期间挂住一步——是可行的：`agen
+ 
+ | 阶段 | 内容 |
+ |---|---|
+-| **T-1** | `ignorable` 写入面；replacement 兜底渲染器 |
++| **T-1** | `ignorable` 写入面；replacement 兜底渲染器（**已交付**） |
+ | **T0** | 实时暂停/恢复；复用既有 `forkAt` 的轨迹行操作；steer/queue 插入表单；暂停横幅 |
+ | **T1** | 标注；基于 `traceSession` 的血缘面板；原地回滚；仅限指令的审批编辑 |
+ | **T2** | 断点 park；错误自动暂停；副作用清单；轨迹 diff；分支探索 |
+diff --git a/packages/client/runtime/src/client/sessions/conversation.ts b/packages/client/runtime/src/client/sessions/conversation.ts
+index 698d8ab..3bd8d4c 100644
+--- a/packages/client/runtime/src/client/sessions/conversation.ts
++++ b/packages/client/runtime/src/client/sessions/conversation.ts
+@@ -230,10 +230,11 @@ export interface CompactionSummaryNode {
+ /**
+  * Fallback for surface events this UI version does not know: the documented
+  * default arm of `SessionEventMap`, which is merge-extensible, so the
+- * projection's switch cannot end in `assertNever`. No event produces this node
+- * today — `isAppendSurfaceEvent` admits only the three types in core's
+- * `SurfaceEventType`, and each has its own arm — and it exists so widening that
+- * set core-side degrades to a raw row instead of dropping the event silently.
++ * projection's switch cannot end in `assertNever`. It covers two degradations:
++ * widening core's `SurfaceEventType` set, and a surface REPLACEMENT no ordinary
++ * Definition claims. The latter is reachable today — any producer other than
++ * compaction — and `replaced` distinguishes it so the renderer reports shadowed
++ * history instead of presenting the replacement as an ordinary message.
+  */
+ export interface UnknownSurfaceNode {
+   kind: 'unknown'
+@@ -242,6 +243,11 @@ export interface UnknownSurfaceNode {
+   time: number
+   type: string
+   data: unknown
++  /**
++   * Surface nodes this event shadowed, when it entered as a positional
++   * replacement. Absent for an append-origin event.
++   */
++  replaced?: readonly number[]
+ }
+ 
+ /**
+diff --git a/packages/client/ui-conversation/src/client/chat/MessageItem.tsx b/packages/client/ui-conversation/src/client/chat/MessageItem.tsx
+index 00b5110..5de203c 100644
+--- a/packages/client/ui-conversation/src/client/chat/MessageItem.tsx
++++ b/packages/client/ui-conversation/src/client/chat/MessageItem.tsx
+@@ -295,10 +295,15 @@ export const TurnMaxTokensNodeView = memo(function TurnMaxTokensNodeView({ t }:
+ /** Explicit unknown-surface keyed Chat renderer. */
+ export const UnknownNodeView = memo(function UnknownNodeView({ node, t }: ChatNodeViewProps<'unknown'>) {
+   const data = node.data
++  // A replacement shadowed history the reader already saw; naming that is the
++  // fact they need, so it labels the row instead of the raw event type.
++  const label = data.replaced === undefined
++    ? t('message.unknownSurface', { type: data.type })
++    : t('message.shadowedSurface', { count: data.replaced.length })
+   return (
+     <div className={css.contextRow}>
+       <JsonBlock
+-        label={t('message.unknownSurface', { type: data.type })}
++        label={label}
+         payload={data.data}
+         truncatedLabel={total => t('json.truncated', { total })}
+       />
+diff --git a/packages/client/ui-conversation/src/client/conversation-nodes/fallback.ts b/packages/client/ui-conversation/src/client/conversation-nodes/fallback.ts
+index 79bc97e..0de5388 100644
+--- a/packages/client/ui-conversation/src/client/conversation-nodes/fallback.ts
++++ b/packages/client/ui-conversation/src/client/conversation-nodes/fallback.ts
+@@ -2,21 +2,32 @@ import type { Context } from '@deepseek-ai/cordis'
+ import type {
+   ConversationNodeDefinition, UnknownSurfaceNode,
+ } from '@deepseek-ai/dsh-client-runtime/client'
+-import { isAppendSurfaceEvent } from '@deepseek-ai/dsh-client-runtime/client'
++import {
++  isAppendSurfaceEvent, isReplacementSurfaceEvent,
++} from '@deepseek-ai/dsh-client-runtime/client'
+ import { chatNode } from './common.ts'
+ 
+ declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
+   interface ChatNodeDataMap {
+-    /** Generic presentation of an unclaimed append-surface event. */
++    /** Generic presentation of an unclaimed surface event. */
+     unknown: UnknownSurfaceNode
+   }
+ }
+ 
+-/** Unclaimed append-surface fallback Definition. */
++/**
++ * Unclaimed surface fallback Definition, covering both surface origins.
++ *
++ * The registry admits ONE fallback and consults it only when no ordinary
++ * Definition claimed the chat target, so replacements share this Definition
++ * rather than adding a second. Without the replacement arm an unclaimed
++ * replacement renders nothing at all: the ordinary message Definition matches
++ * only append-origin events plus compaction's own checkpoint (identified by
++ * plugin name), and this fallback previously matched only append origin.
++ */
+ export const unknownFallbackDefinition: ConversationNodeDefinition<UnknownSurfaceNode> = {
+   kind: 'unknown-surface',
+   target: 'chat',
+-  match: event => isAppendSurfaceEvent(event)
++  match: event => isAppendSurfaceEvent(event) || isReplacementSurfaceEvent(event)
+     ? { id: String(event.seq), role: 'start' }
+     : null,
+   start: (_context, match) => ({
+@@ -25,6 +36,13 @@ export const unknownFallbackDefinition: ConversationNodeDefinition<UnknownSurfac
+     time: match.event.time,
+     type: match.event.type,
+     data: match.event.data,
++    // A replacement shadows model history the user already saw, so the node
++    // carries the shadowed seqs for the renderer to report. `sourceEventSeqs`
++    // is a superset: core requires it to include every shadowed node, and a
++    // producer may cite further sources (compaction cites its own summary).
++    ...isReplacementSurfaceEvent(match.event)
++      ? { replaced: match.event.sourceEventSeqs ?? [] }
++      : {},
+   }),
+   update: context => context.state,
+   buildViewNode: context => context.state === undefined
+@@ -33,7 +51,7 @@ export const unknownFallbackDefinition: ConversationNodeDefinition<UnknownSurfac
+ }
+ 
+ /**
+- * Register the unmatched append-surface fallback contribution.
++ * Register the unmatched surface fallback contribution.
+  * @param ctx - owning UI Conversation context.
+  */
+ export function registerUnknownConversationFallback(ctx: Context): void {
+diff --git a/packages/client/ui-conversation/src/client/locales.ts b/packages/client/ui-conversation/src/client/locales.ts
+index c9b6f65..71ce050 100644
+--- a/packages/client/ui-conversation/src/client/locales.ts
++++ b/packages/client/ui-conversation/src/client/locales.ts
+@@ -110,6 +110,7 @@ export const zh = {
+   'message.compaction.expand': '点击查看压缩摘要',
+   'message.compaction.unavailable': '压缩摘要不可用',
+   'message.unknownSurface': '未知 surface 事件：{type}',
++  'message.shadowedSurface': '此处历史已被遮蔽：{count} 条记录不再进入模型上下文',
+   'message.unknownBlock': '未知内容块',
+   'message.stopped': '已停止',
+   'message.branch': '在新对话中分支',
+@@ -279,6 +280,7 @@ export const en = {
+   'message.compaction.expand': 'View compaction summary',
+   'message.compaction.unavailable': 'Compaction summary unavailable',
+   'message.unknownSurface': 'Unknown surface event: {type}',
++  'message.shadowedSurface': 'History shadowed here: {count} item(s) no longer enter model context',
+   'message.unknownBlock': 'Unknown content block',
+   'message.stopped': 'Stopped',
+   'message.branch': 'Branch into a new conversation',
+diff --git a/packages/client/ui-conversation/tests/chat-branch-tails.client.spec.tsx b/packages/client/ui-conversation/tests/chat-branch-tails.client.spec.tsx
+index 67a213a..a26cb28 100644
+--- a/packages/client/ui-conversation/tests/chat-branch-tails.client.spec.tsx
++++ b/packages/client/ui-conversation/tests/chat-branch-tails.client.spec.tsx
+@@ -731,6 +731,21 @@ describe('MessageItem arms', () => {
+     expect(unknownView.getByText(/未知 surface 事件：surface\/next/)).toBeTruthy()
+   })
+ 
++  it('an unclaimed replacement reports the history it shadowed', () => {
++    const view = render(
++      <MessageItem t={t} node={{
++        kind: 'unknown',
++        seq: 9,
++        type: 'user/message',
++        data: { text: 'try a different approach' },
++        replaced: [3, 4, 5],
++      } as never}
++      />,
++    )
++    expect(view.getByText(/此处历史已被遮蔽：3 条记录不再进入模型上下文/)).toBeTruthy()
++    expect(view.queryByText(/未知 surface 事件/)).toBeNull()
++  })
++
+   it('a compaction marker discloses its summary and never shows the framed checkpoint', () => {
+     const view = render(
+       <MessageItem t={t} node={{
+diff --git a/packages/client/ui-conversation/tests/conversation-node-definitions.client.spec.ts b/packages/client/ui-conversation/tests/conversation-node-definitions.client.spec.ts
+index c6a33c2..05a4394 100644
+--- a/packages/client/ui-conversation/tests/conversation-node-definitions.client.spec.ts
++++ b/packages/client/ui-conversation/tests/conversation-node-definitions.client.spec.ts
+@@ -930,4 +930,71 @@ describe('built-in conversation node Definitions', () => {
+       compaction: { summary: 'manual summary', summaryEventSeq: 20 },
+     })
+   })
++
++  it('presents a non-compaction surface replacement instead of dropping it', () => {
++    const value = assembler([
++      at(0, 'turn/start', { turn: 1 }),
++      at(1, 'user/message', textMessage('first', 'first question')),
++      at(2, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
++      at(3, 'user/message', {
++        ...textMessage('rewind', 'try a different approach'),
++        source: { kind: 'plugin', plugin: 'trajectory-control' },
++      }, { surfaceOp: { op: 'replace', start: 1, end: 1 }, sourceEventSeqs: [1] }),
++    ], true)
++
++    const unknown = node(snapshot(value), 'unknown')
++    expect(unknown?.data).toMatchObject({ seq: 3, type: 'user/message', replaced: [1] })
++  })
++
++  it('omits shadowed seqs for an append-origin fallback node', () => {
++    // Asserted on the Definition directly: every append-surface type has an
++    // owning Definition today, so no assembled window reaches this arm. It
++    // exists for a core-side widening of `SurfaceEventType`.
++    const event = {
++      seq: 7,
++      time: 1_700_000_000_007,
++      type: 'user/message',
++      data: textMessage('appended', 'plain append'),
++      surfaceOp: 'append',
++    }
++    const match = { event } as unknown as Parameters<typeof unknownFallbackDefinition.start>[1]
++    const state = unknownFallbackDefinition.start(
++      undefined as unknown as Parameters<typeof unknownFallbackDefinition.start>[0],
++      match,
++      undefined as unknown as Parameters<typeof unknownFallbackDefinition.start>[2],
++    )
++
++    expect(state).toMatchObject({ seq: 7, type: 'user/message' })
++    expect((state as { replaced?: readonly number[] }).replaced).toBeUndefined()
++  })
++
++  it('reports a replacement citing no sources as shadowing nothing', () => {
++    const value = assembler([
++      at(0, 'turn/start', { turn: 1 }),
++      at(1, 'user/message', textMessage('first', 'first question')),
++      at(2, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
++      at(3, 'user/message', {
++        ...textMessage('rewind', 'replacement without provenance'),
++        source: { kind: 'plugin', plugin: 'trajectory-control' },
++      }, { surfaceOp: { op: 'replace', start: 1, end: 1 } }),
++    ], true)
++
++    const unknown = node(snapshot(value), 'unknown')
++    expect(unknown?.data).toMatchObject({ seq: 3, replaced: [] })
++  })
++
++  it('leaves compaction replacements to their own Definition', () => {
++    const value = assembler([
++      at(0, 'turn/start', { turn: 1 }),
++      at(1, 'user/message', textMessage('first', 'first question')),
++      at(2, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
++      at(3, 'user/message', {
++        ...textMessage('checkpoint', 'compaction summary'),
++        source: { kind: 'plugin', plugin: 'compact', compactionId: 'auto-1' },
++      }, { surfaceOp: { op: 'replace', start: 1, end: 1 }, sourceEventSeqs: [1] }),
++    ], true)
++
++    expect(node(snapshot(value), 'unknown')).toBeUndefined()
++    expect(node(snapshot(value), 'compaction')).toBeDefined()
++  })
+ })
+-- 
+2.51.0
+

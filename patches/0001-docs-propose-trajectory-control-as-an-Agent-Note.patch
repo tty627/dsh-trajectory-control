@@ -1,0 +1,371 @@
+From a263e82affd75c806a5bf7571564371123079097 Mon Sep 17 00:00:00 2001
+From: Kissshot <ttyinzg@gmail.com>
+Date: Mon, 17 Aug 2026 11:25:18 +0800
+Subject: [PATCH 1/3] docs: propose trajectory control as an Agent Note
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replace the ad-hoc trajectory-control-plugin/DESIGN.md at the repository
+root with a conforming proposed/architecture Agent Note triplet.
+
+The note records the verified runtime position, which corrects the prior
+draft in both directions: in-place rewind needs no surface-mechanism
+change (anchor-to-tail replace is already expressible, with two in-tree
+precedents), while two real blockers were missing — Session.append has no
+ignorable writer surface, so every new event is required-on-read, and a
+non-compaction user/message replacement renders as nothing because the
+conversation view matches compaction by hardcoded plugin name and the
+generic fallback admits only append-surface events.
+
+Delivery moves from a dynamic Cordis plugin to in-repository packages:
+new session events, new RPCs, and the conversation-view fix are all
+unreachable from a dynamic package.
+---
+ ...tory-control-and-in-place-rewind.i18n.yaml |   6 +
+ ...-trajectory-control-and-in-place-rewind.md | 157 ++++
+ ...ajectory-control-and-in-place-rewind.zh.md | 157 ++++
+ trajectory-control-plugin/DESIGN.md           | 804 ------------------
+ 4 files changed, 320 insertions(+), 804 deletions(-)
+ create mode 100644 .agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+ create mode 100644 .agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+ create mode 100644 .agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+new file mode 100644
+index 0000000..5d1c1bb
+--- /dev/null
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+@@ -0,0 +1,6 @@
++# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
++# side as of the last confirmed-consistent state. Both languages carry equal authority;
++# after editing either side, bring the other along and re-record with:
++#   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
++2026-08-17-trajectory-control-and-in-place-rewind.md: 63673ebef9a9aa7a954bffde083399f5223e9540
++2026-08-17-trajectory-control-and-in-place-rewind.zh.md: 4813e02b4518f1a62ed487c45d6ea41356ffd53e
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+new file mode 100644
+index 0000000..63673eb
+--- /dev/null
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+@@ -0,0 +1,157 @@
++# Agent Note: Trajectory control — pause, branch rollback, and in-place rewind
++
++Status: proposed
++
++English | [中文](2026-08-17-trajectory-control-and-in-place-rewind.zh.md)
++
++## Problem
++
++The Trajectory view is a passive replay of a session's event stream. A user watching an agent take a wrong turn has no way to act on what they see: they cannot stop it at the step they are looking at, cannot re-enter the conversation at an earlier decision point, and cannot compare what a different instruction would have produced. The only available controls are session-wide — cancel the whole turn, or start over.
++
++The requested capability is to turn that view into a console: pause a running agent, roll back to a chosen point (either by branching or by rewriting the session in place), insert new conversation there, and drive the harness onward from that point. The goal is control over the model's output by controlling each intermediate step it sees.
++
++Three properties of the existing runtime constrain any solution:
++
++- **The session log is append-only**, and the `Model-visible ⟺ logged` invariant means anything that reaches a model request must be reconstructable from that log. Rollback cannot truncate, and cannot be an in-memory edit.
++- **The world is not rollbackable.** Tool side effects (file writes, processes, network) have already happened. Rolling back the conversation does not undo them.
++- **Pause granularity is bounded by loop boundaries.** An agent can be stopped at a turn or pre-step boundary, not frozen mid-tool-execution.
++
++A prior revision of this design (kept as `trajectory-control-plugin/DESIGN.md` before this note existed) reached the right feature set but misjudged three load-bearing facts about the runtime, in both directions: it treated a non-existent core constraint as the project's highest risk, and it missed two real blockers entirely. Recording the verified position is most of this note's value.
++
++## Proposal
++
++Deliver trajectory control as **in-repository packages**, not as a dynamic Cordis plugin, in five stages: a two-item prerequisite stage (T-1), then T0–T3 as feature tiers.
++
++### Delivery form: why in-repository packages
++
++A dynamic Cordis plugin cannot carry this feature, for three independent reasons:
++
++- **New session events.** The persistence read path refuses a log containing an event type this build does not know unless the event is marked `ignorable` (`packages/session/session-persistence/src/coordinator.ts:1063`). That vocabulary is the generated `KNOWN_SESSION_EVENT_TYPES` (`packages/core/session/src/known-event-types.ts:19`), scanned from in-repository `SessionEventMap` merges; its own JSDoc states that out-of-repo plugin events are outside the list by construction.
++- **New RPCs.** `RpcMethodMap` (`packages/host/apiproxy/src/api/rpc-map.ts:24`) is a closed interface with no declaration-merge point.
++- **Client rendering changes.** The conversation view's replacement handling lives inside `packages/client/ui-conversation` (see the T-1 fallback item below).
++
++The [session-log version mechanism note](../../implemented/architecture/2026-08-10-session-log-version-mechanism.md) already records and accepts this: out-of-repo plugin events refuse resume under first-party readers, and the refusal is loud rather than silent. A dynamic plugin remains useful for prototyping the T0 subset that needs no new event and no new RPC.
++
++### T-1: two prerequisites, each an independent change
++
++**1. A writer surface for `ignorable` on `Session.append`.** The field exists on the event envelope (`packages/core/session/src/types.ts:422`) and is honored by seed validation, both persistence backends, and the BFF wire schema — but no writer can set it. `Session.append`'s only optional parameter is `SurfaceIntent` (`surfaceOp` + `sourceEventSeqs`), and the envelope is constructed without the field (`packages/core/session/src/index.ts:626`). Consequently **every new event type is required-on-read today**, and an older build refuses the whole session on encountering one.
++
++The version-mechanism note anticipates this exact change: *"writers do not yet set `ignorable` (no producer needs it), so `Session.append` gains that surface with its first user."* Trajectory control is that first user.
++
++The interface question this raises must be settled before implementation: `SurfaceIntent` is reachable only for the three `SurfaceEventType` variants (`index.ts:604` makes the parameter conditional on the event type), so it is the wrong carrier — `trajectory/annotation` is a non-surface event and could not pass a value through it. The choice is between a fourth `append` parameter and a separate options object for non-surface events. This affects every future producer, not only this feature.
++
++Adding the writer surface does not bump `SESSION_FORMAT_VERSION`: the field is already part of the envelope.
++
++**2. A fallback renderer for unrecognized surface replacements.** The conversation view identifies replacements by hardcoded plugin name:
++
++```ts
++// packages/client/ui-conversation/src/client/conversation-nodes/message.ts:25-28
++if (event.type !== 'user/message' || !isReplacementSurfaceEvent(event)) return false
++const source = event.data.source
++return source.kind === 'plugin' && source.plugin === 'compact'
++```
++
++`command.ts:83` applies the same `plugin === COMPACT_PLUGIN` test, and the generic fallback matches only `isAppendSurfaceEvent` (`conversation-nodes/fallback.ts:19`). A `user/message` replacement from any other producer is therefore claimed by no definition and caught by no fallback: **it renders as nothing.** In-place rewind produces exactly that event shape.
++
++The fix is a replacement-side fallback definition symmetric to `unknownFallbackDefinition`. It is independent of this feature and removes a standing hazard for any future replacement producer. It must render a marker that history was shadowed at that point — not omit the content — because `isAppendSurfaceEvent` exists precisely so a human transcript is not erased by a landed replacement (`packages/core/session/src/surface.ts:44-47`).
++
++### In-place rewind needs no surface-mechanism change
++
++The prior revision claimed the replace range is constrained to lie "between two existing nodes" and that core must be extended to allow shadowing "from the anchor to the end of the log," rating this the project's highest risk. **That constraint does not exist.** Validation requires only that `start` and `end` are both present in the *current* surface and ordered by position (`packages/core/session/src/surface.ts:246-266`). Because the replacing event is appended at the tail, the last surface node at validation time is the tail, so "anchor through tail" is expressible today. Two in-tree precedents do it: `packages/host/apiproxy/tests/api-proxy-models.spec.ts:221` uses `{ op: 'replace', start: 0, end: events.length - 1 }`, and `packages/compaction/compaction/tests/tool-pairing.spec.ts:171` uses `end: nodes.at(-1)!`.
++
++Following the prior revision would have been actively harmful: `isReplaceOp` requires exactly three keys (`surface.ts:175`), so any added field is rejected at append — and `SurfaceOp` variants are named in the `SESSION_FORMAT_VERSION` bump rule (`types.ts:41-52`), so the change would have cost a version bump to obtain a capability that already exists.
++
++The four real constraints, none of which the prior revision identified:
++
++1. `end` must be a **surface** node, not the last log event. A tail of `turn/end`, `step/end`, or a chunk fails with `end seq N not found in surface`; the caller must resolve to the last surface node.
++2. `sourceEventSeqs` must enumerate **every** shadowed node (`surface.ts:239`), each strictly earlier than the event (`surface.ts:235`). This makes the replacement `user/message` the carrier of shadowing information, not the `trajectory/rewind` payload.
++3. The range cannot be expressed as a `tool/result`: those replacements are restricted to one node, must target a `tool/result`, and may change only content (`surface.ts:287-318`). Use `user/message`.
++4. Ordering is positional on the surface, not by seq value.
++
++Because real replace semantics are available, the prior revision's "invisible fork" transition is dropped: it would leave misleading branch lineage for no benefit.
++
++### Event vocabulary
++
++One required event and two ignorable ones. `trajectory/branch` and `trajectory/explore` from the prior revision are dropped — lineage is reconstructable from `header.parentSession`, and exploration outcomes fit in an annotation.
++
++- `trajectory/rewind` (**required**) — `{ anchorSeq, replacementSeq }`. Marks that model context re-derives from the anchor, distinguishing a rollback from compaction's structurally identical replacement. An older build refuses to load a session containing it, which is the intended behavior: reconstructing a shadowed history as an ordinary log would yield wrong model context.
++- `trajectory/annotation` (**ignorable**) — anchored note; `visibleToModel` injects it at `agent/pre-step`.
++- `trajectory/pause` (**ignorable**) — pause audit record.
++
++Adding ordinary event types does not bump `SESSION_FORMAT_VERSION`; the `ignorable` guard covers vocabulary growth.
++
++### Reuse rather than rebuild
++
++`ctx.sessionQuery` and existing projections already provide read models the prior revision planned to build: `traceSession()` for lineage (ancestors plus recursive descendants, with a `complete: false` marker and cycle detection), `traceEvent()` for `replacementChain`, `listEvents()` for `current | shadowed | log-only` classification, `session-stats` for turn/step counts and phase wall times, and `session-log-export` for ZIP/JSONL export. Trajectory control consumes these; it does not define competing services, which also avoids public service methods with a single internal caller.
++
++Two real gaps in that reuse path, each worth an independent fix: `parent_session` carries no SQL index (`packages/session-query/session-query-sqlite/src/schema.ts` declares only `id TEXT PRIMARY KEY`), and `listChildren` additionally requires `origin === 'subagent'` (`packages/subagent/subagent/src/list-children.ts:141`), which excludes ordinary fork children a lineage panel must show.
++
++### Corrections to the runtime model
++
++The prior revision's flows would not compile or would misbehave against these verified facts:
++
++- **No `paused` status.** `AgentStatus = 'idle' | 'running'` (`packages/core/agent/src/runtime-types.ts:50`). Pause is `idle` plus a plugin-owned marker.
++- **`AgentCancelCause` is a closed union** — `user | parent | hook | disposed` (`packages/core/session/src/types.ts:143`). A `{ kind: 'user-pause' }` cause is invalid; `{ kind: 'hook', reason: 'trajectory-pause' }` carries the audit reason.
++- **`agent.steering()` does not exist.** Steering is `InboxTarget = 'next-step'` (`packages/core/agent/src/types.ts:10`) passed to `agent.send`.
++- **`session.fork` already builds a live child agent** and inherits the preset (`packages/host/apiproxy/src/api-proxy.ts:2420`), so a separate resume step is unnecessary. Boundary snapping to the next `turn/end` lives in that RPC (`:2382`); `SessionStore.fork` does not snap and rejects a prefix ending inside an open turn with `OPEN_TURN` (`packages/core/session/src/index.ts:1128`). The rule is "must not end inside an open turn," not "must land on a `turn/end`": a log-only event after a closed turn is a valid boundary.
++- **Preset resolution reads the log, not the header** (`api-proxy.ts:1258`), because a session that switched composition while blank ran its turns under the newer one while the header is written once at creation.
++- **`turn/end.reason` is a structured value**, and `blocked` and `max-tokens` belong in automatic-pause rules alongside `error`. `agent/turn-stopping` is `@mode serial` and cannot veto stopping.
++- **Tool arguments cannot be rewritten.** `ToolExecutionInput.arguments` is `readonly`, and `tools/execute` states that call identity remains immutable (`packages/core/tools/src/index.ts:154`). Editing instructions at an approval prompt is feasible through pre-step rewriting; editing tool arguments is not, and the correct alternative is a `tools/pre-execute` block with corrective feedback so the model reissues the call and the log stays truthful.
++
++Pre-step "park" — holding a step while a human decides — is feasible: `agent/pre-step` is a waterfall with async listeners and a signal (`runtime-types.ts:231`), `userQuestions.ask()` accepts a signal and awaits a human, and the tool-call timeout policy is scoped to `tools/execute` and cannot kill a parked step. `plan-mode` and `tool-cordis` already do asynchronous work and message injection at that boundary.
++
++### Staging
++
++| Stage | Content |
++|---|---|
++| **T-1** | `ignorable` writer surface; replacement fallback renderer |
++| **T0** | Live pause/resume; trajectory row actions reusing the existing `forkAt`; steer/queue insertion form; pause banner |
++| **T1** | Annotations; lineage panel over `traceSession`; in-place rewind; instruction-only approval editing |
++| **T2** | Breakpoint park; automatic error pause; side-effect inventory; trajectory diff; branch exploration |
++| **T3** | Export/import/replay over `session-log-export`; stats over `session-stats`; subagent inlining; goal coupling |
++
++T0 is smaller than the prior revision assumed: `forkAt(seq)` already ships and is already mounted as a turn-tail branch action (`packages/client/ui-conversation/src/client/apply.ts:417`, `chat/TurnTailNodeView.tsx:45`).
++
++Exploration limits are validated `Config` fields changeable from `cordis.yml`, not `DEFAULT_*` constants, per the no-hardcoded-tunables rule; exploration defaults to disabled because it multiplies cost.
++
++## Alternatives considered
++
++**A dynamic Cordis plugin.** Rejected as the delivery form: new session events would be refused on the next load, `RpcMethodMap` admits no merge, and the conversation-view fix is inside an existing package. Retained only as a prototyping path for the T0 subset that adds no event and no RPC.
++
++**A new `SurfaceOp` variant for anchor-to-tail shadowing** (the prior revision's plan). Rejected because the capability already exists, the three-key `isReplaceOp` check rejects added fields, and `SurfaceOp` changes fall under the version-bump rule — paying a durable-format cost for nothing.
++
++**"Invisible fork" as an in-place-rollback stand-in** — fork internally and swap the visible session card. Rejected once real replace semantics were confirmed available: it leaves branch lineage that misrepresents what the user did, and it was only ever justified by the surface constraint that turned out not to exist.
++
++**Truncating the log at the rollback point.** Rejected: the log is append-only and audit-complete, and truncation would destroy the record of what the agent actually did — the evidence a rollback console exists to inspect.
++
++**Rewriting tool arguments at an approval prompt.** Rejected as impossible rather than undesirable: `arguments` is `readonly` and call identity is immutable by contract. Blocking with corrective feedback so the model reissues the call keeps `tool/call` and execution consistent.
++
++**Dedicated services for lineage, statistics, and export.** Rejected in favor of consuming `ctx.sessionQuery`, `session-stats`, and `session-log-export`, which already implement them; duplicating would add public methods with one internal caller.
++
++**Marking `trajectory/rewind` ignorable** so older builds keep loading rewound sessions. Rejected: an unrecognized rewind marker would let an older reader rebuild shadowed history as ordinary context, producing a wrong model request. Loud refusal is correct.
++
++## Acceptance criteria
++
++- `Session.append` can mark an event `ignorable`, and an older build skips such an event while still refusing an unknown required one.
++- A `user/message` surface replacement whose source is not the compaction plugin renders a shadowed-history marker in the chat view instead of nothing.
++- Pausing a running agent leaves it `idle` with queued work intact, records one `trajectory/pause`, and resumes without fabricating an empty instruction.
++- A trajectory row action forks at that row's boundary, inserts the supplied instruction, and continues in the child session; the parent trajectory remains intact.
++- An in-place rewind appends a replacement `user/message` plus `trajectory/rewind`, derives model context as anchor prefix plus insertion, and leaves shadowed events readable as `shadowed` through `sessionQuery.listEvents`.
++- Every new registration is disposable: disposing the fiber removes it.
++- Coverage matches the surfaces per repository testing policy: unit tests for boundary and surface resolution, a non-unit real-composition test booting a test `cordis.yml` through the Loader, keyless snapshots for the fork-and-steer and rewind transcripts, and a GIF recorded from the PR's own server for each user-visible GUI change.
++
++## Risks
++
++**The `ignorable` writer surface touches `packages/core/session`,** which every append path depends on. The change is additive and does not alter existing call sites, but the interface choice is durable and should be reviewed on its own rather than inside a feature PR.
++
++**In-place rewind is irreversible from the user's perspective** even though the log retains everything: after a rewind, model context no longer contains the shadowed turns. The shadowed events stay auditable, which is what makes this acceptable.
++
++**Rollback does not undo world state.** Files written, processes started, and network calls made before the rollback point remain. Fork and rewind confirmation must show the side-effect inventory for the range and state plainly that these are not reverted; exploration repeats the warning per variant. Sandbox checkpoint/restore would change this, and is out of scope.
++
++**Concurrent rewinds contend for the surface tail.** A second rewind computed against a stale tail fails with `end seq N not found in surface`. Serialize per session and recompute on failure.
++
++**`sourceEventSeqs` grows with rollback distance** — rolling back dozens of turns enumerates hundreds of seqs. Correct but bulky; the UI must not render the array.
++
++**Branch count grows without bound.** Lineage folding and archiving (hide, never delete) keep the panel usable.
++
++**Exploration multiplies model cost.** Configurable variant, round, and token ceilings plus a default-off switch bound it; the stats panel reports consumption per exploration.
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+new file mode 100644
+index 0000000..4813e02
+--- /dev/null
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+@@ -0,0 +1,157 @@
++# Agent Note: 轨迹控制 —— 暂停、分支回滚与原地回滚
++
++Status: proposed
++
++[English](2026-08-17-trajectory-control-and-in-place-rewind.md) | 中文
++
++## 问题
++
++Trajectory 视图是会话事件流的被动回放。用户看着 agent 走错方向，却无法对所见内容采取行动：不能在正看着的那一步截住它，不能回到更早的决策点重新插入对话，也无法对比换一条指令会产生什么结果。现有控制手段都是会话级的——取消整个 turn，或者从头再来。
++
++所要求的能力是把该视图变成控制台：暂停运行中的 agent、回滚到选定点（分支或原地重写会话）、在该点插入新对话、并驱动 harness 从那里继续。目标是通过控制模型看到的每一个中间步骤来控制其输出。
++
++现有运行时的三条性质约束了任何方案：
++
++- **会话日志只可追加**，且 `Model-visible ⟺ logged` 不变量要求任何进入模型请求的内容都必须可从该日志重建。回滚不能截断，也不能是内存级修改。
++- **世界不可回滚。** 工具副作用（文件写入、进程、网络）已经发生。回滚对话不会撤销它们。
++- **暂停粒度受循环边界限制。** agent 只能停在 turn 或 pre-step 边界，无法冻结在工具执行中途。
++
++本设计的上一版（在本 note 出现之前保存为 `trajectory-control-plugin/DESIGN.md`）得出了正确的功能集，但在三个承重事实上判断有误，且方向相反：它把一个并不存在的核心约束列为项目最高风险，同时完全漏掉了两个真实阻塞项。记录经核实的结论是本 note 的主要价值。
++
++## 提案
++
++以**仓库内 packages** 而非动态 Cordis 插件交付轨迹控制，分五个阶段：一个含两项的前置阶段（T-1），然后是 T0–T3 功能梯队。
++
++### 交付形态：为什么是仓库内 packages
++
++动态 Cordis 插件无法承载此功能，有三条各自独立的原因：
++
++- **新增会话事件。** 持久化读路径会拒绝含有本构建不认识的事件类型的日志，除非该事件标记了 `ignorable`（`packages/session/session-persistence/src/coordinator.ts:1063`）。该词汇表是生成的 `KNOWN_SESSION_EVENT_TYPES`（`packages/core/session/src/known-event-types.ts:19`），从仓库内的 `SessionEventMap` 合并扫描得出；其 JSDoc 明确指出仓库外插件事件按构造方式即不在此列表内。
++- **新增 RPC。** `RpcMethodMap`（`packages/host/apiproxy/src/api/rpc-map.ts:24`）是封闭 interface，无声明合并点。
++- **Client 渲染改动。** conversation 视图的 replacement 处理位于 `packages/client/ui-conversation` 内部（见下文 T-1 兜底项）。
++
++[会话日志版本机制 note](../../implemented/architecture/2026-08-10-session-log-version-mechanism.md) 已记录并接受这一现状：仓库外插件事件在第一方读取器下会拒绝 resume，且该拒绝是显式而非静默的。动态插件对于原型验证 T0 中无需新事件、无需新 RPC 的那部分仍然有用。
++
++### T-1：两项前置，各为独立改动
++
++**1. `Session.append` 的 `ignorable` 写入面。** 该字段存在于事件 envelope（`packages/core/session/src/types.ts:422`），并已被 seed 校验、两个持久化后端与 BFF wire schema 认可——但没有任何写入方能设置它。`Session.append` 唯一的可选参数是 `SurfaceIntent`（`surfaceOp` + `sourceEventSeqs`），构造 envelope 时不写该字段（`packages/core/session/src/index.ts:626`）。因此**今天任何新事件类型都是 required-on-read**，旧构建遇到其一即拒绝整条会话。
++
++版本机制 note 恰好预留了这一改动：*"writers do not yet set `ignorable` (no producer needs it), so `Session.append` gains that surface with its first user."* 轨迹控制就是那个 first user。
++
++由此引出的接口问题必须在实现前定下：`SurfaceIntent` 仅对三种 `SurfaceEventType` 变体可达（`index.ts:604` 使该参数以事件类型为条件），因此它是错误的载体——`trajectory/annotation` 是非 surface 事件，无法通过它传值。选择在于给 `append` 增加第四个参数，还是为非 surface 事件另设一个 options 对象。这影响所有未来的生产者，不只本功能。
++
++增加写入面**不** bump `SESSION_FORMAT_VERSION`：该字段已属 envelope 的一部分。
++
++**2. 未识别 surface replacement 的兜底渲染器。** conversation 视图靠硬编码插件名识别 replacement：
++
++```ts
++// packages/client/ui-conversation/src/client/conversation-nodes/message.ts:25-28
++if (event.type !== 'user/message' || !isReplacementSurfaceEvent(event)) return false
++const source = event.data.source
++return source.kind === 'plugin' && source.plugin === 'compact'
++```
++
++`command.ts:83` 使用同样的 `plugin === COMPACT_PLUGIN` 判断，而通用 fallback 只匹配 `isAppendSurfaceEvent`（`conversation-nodes/fallback.ts:19`）。因此来自任何其他生产者的 `user/message` replacement 既无 definition 认领、也无 fallback 兜住：**它渲染为空白。** 原地回滚产生的正是这种事件形状。
++
++修复方式是补一条与 `unknownFallbackDefinition` 对称的 replacement 侧兜底 definition。它独立于本功能，并消除了任何未来 replacement 生产者面临的长期隐患。它必须渲染出"此处历史已被遮蔽"的标记，而**不是**省略内容——`isAppendSurfaceEvent` 存在的理由正是避免已落地的 replacement 抹掉人类转录（`packages/core/session/src/surface.ts:44-47`）。
++
++### 原地回滚无需改动 surface 机制
++
++上一版称 replace 范围被约束为处于"两个已存在节点之间"，需要扩展核心以允许"从锚点到日志尾部"的遮蔽，并将其评为项目最高风险。**该约束并不存在。** 校验只要求 `start` 与 `end` 都存在于**当前** surface 中且按位置有序（`packages/core/session/src/surface.ts:246-266`）。由于替换事件追加在尾部，校验时的最后一个 surface 节点即是尾部，故"锚点到尾部"今天就能表达。仓库内有两处先例：`packages/host/apiproxy/tests/api-proxy-models.spec.ts:221` 使用 `{ op: 'replace', start: 0, end: events.length - 1 }`，`packages/compaction/compaction/tests/tool-pairing.spec.ts:171` 使用 `end: nodes.at(-1)!`。
++
++照上一版执行会主动造成损害：`isReplaceOp` 要求恰好三个键（`surface.ts:175`），任何新增字段都会在 append 时被拒；而 `SurfaceOp` 变体被 `SESSION_FORMAT_VERSION` 的 bump 规则明文列举（`types.ts:41-52`），该改动将为一项已具备的能力付出版本 bump 的代价。
++
++四条真实约束，上一版一条都未识别：
++
++1. `end` 必须是 **surface** 节点，而非最后一个日志事件。尾部若是 `turn/end`、`step/end` 或 chunk，会以 `end seq N not found in surface` 失败；调用方必须自行解析到最后一个 surface 节点。
++2. `sourceEventSeqs` 必须列举**每一个**被遮蔽节点（`surface.ts:239`），且每个都严格早于本事件（`surface.ts:235`）。这使得遮蔽信息的载体是那条 replacement `user/message`，而非 `trajectory/rewind` 的 payload。
++3. 该范围不能表达为 `tool/result`：此类 replacement 被限制为一个节点、必须指向 `tool/result`、且只能改 content（`surface.ts:287-318`）。用 `user/message`。
++4. 顺序按 surface 位置判定，而非 seq 数值。
++
++由于真 replace 语义可用，上一版的"隐形 fork"过渡方案被舍弃：它会留下误导性的分支血缘而无任何收益。
++
++### 事件词汇
++
++一个 required 事件与两个 ignorable 事件。上一版的 `trajectory/branch` 与 `trajectory/explore` 被删除——血缘可由 `header.parentSession` 重建，探索结果可并入标注。
++
++- `trajectory/rewind`（**required**）—— `{ anchorSeq, replacementSeq }`。标记模型上下文自锚点重新演绎，用以区别于 compaction 结构上完全相同的 replacement。旧构建会拒绝加载含此事件的会话，这是预期行为：把被遮蔽的历史当作普通日志重建会得到错误的模型上下文。
++- `trajectory/annotation`（**ignorable**）—— 锚定的笔记；`visibleToModel` 时在 `agent/pre-step` 注入。
++- `trajectory/pause`（**ignorable**）—— 暂停审计记录。
++
++新增普通事件类型不 bump `SESSION_FORMAT_VERSION`；`ignorable` 守卫覆盖词汇增长。
++
++### 复用而非重建
++
++`ctx.sessionQuery` 与既有 projection 已提供上一版计划自建的读模型：`traceSession()` 提供血缘（祖先加递归后代，带 `complete: false` 标记与环检测）、`traceEvent()` 提供 `replacementChain`、`listEvents()` 提供 `current | shadowed | log-only` 分类、`session-stats` 提供 turn/step 计数与各阶段墙钟时间、`session-log-export` 提供 ZIP/JSONL 导出。轨迹控制消费这些能力，不定义竞争性服务，这同时避免了只有单一内部调用者的公开服务方法。
++
++该复用路径上有两处真实缺口，各值得独立修复：`parent_session` 无 SQL 索引（`packages/session-query/session-query-sqlite/src/schema.ts` 只声明了 `id TEXT PRIMARY KEY`），以及 `listChildren` 额外要求 `origin === 'subagent'`（`packages/subagent/subagent/src/list-children.ts:141`），从而排除了血缘面板必须展示的普通 fork 子会话。
++
++### 对运行时模型的纠正
++
++上一版的流程在以下经核实的事实面前无法编译或行为错误：
++
++- **没有 `paused` 状态。** `AgentStatus = 'idle' | 'running'`（`packages/core/agent/src/runtime-types.ts:50`）。暂停是 `idle` 加一个插件自有标记。
++- **`AgentCancelCause` 是封闭联合** —— `user | parent | hook | disposed`（`packages/core/session/src/types.ts:143`）。`{ kind: 'user-pause' }` 非法；`{ kind: 'hook', reason: 'trajectory-pause' }` 可携带审计原因。
++- **`agent.steering()` 不存在。** steering 是传给 `agent.send` 的 `InboxTarget = 'next-step'`（`packages/core/agent/src/types.ts:10`）。
++- **`session.fork` 已建好带 agent 的子会话**并继承 preset（`packages/host/apiproxy/src/api-proxy.ts:2420`），故无需单独的 resume 步骤。向后吸附到下一个 `turn/end` 的逻辑位于该 RPC（`:2382`）；`SessionStore.fork` 不吸附，且对结束于开放 turn 内的前缀以 `OPEN_TURN` 拒绝（`packages/core/session/src/index.ts:1128`）。规则是"不得结束于开放 turn 之内"，而非"必须落在 `turn/end` 上"：已闭合 turn 之后的 log-only 事件是合法边界。
++- **preset 解析读日志而非 header**（`api-proxy.ts:1258`），因为在空白期切换过 composition 的会话，其 turn 是在新 composition 下跑的，而 header 只在创建时写一次。
++- **`turn/end.reason` 是结构化值**，且 `blocked` 与 `max-tokens` 应与 `error` 一同纳入自动暂停规则。`agent/turn-stopping` 是 `@mode serial`，不能否决终止。
++- **工具参数不可改写。** `ToolExecutionInput.arguments` 是 `readonly`，且 `tools/execute` 声明调用身份不可变（`packages/core/tools/src/index.ts:154`）。在审批处编辑指令可经 pre-step 重写实现；编辑工具参数则不可行，正确替代是以 `tools/pre-execute` 返回 block 加纠正性反馈，让模型重发调用，从而保持日志真实。
++
++pre-step "park"——在人类决定期间挂住一步——是可行的：`agent/pre-step` 是支持 async listener 且带 signal 的 waterfall（`runtime-types.ts:231`），`userQuestions.ask()` 接受 signal 并等待人类，而工具调用超时策略仅作用于 `tools/execute`，无法杀死被 park 的步骤。`plan-mode` 与 `tool-cordis` 已在该边界上执行异步工作并注入消息。
++
++### 分期
++
++| 阶段 | 内容 |
++|---|---|
++| **T-1** | `ignorable` 写入面；replacement 兜底渲染器 |
++| **T0** | 实时暂停/恢复；复用既有 `forkAt` 的轨迹行操作；steer/queue 插入表单；暂停横幅 |
++| **T1** | 标注；基于 `traceSession` 的血缘面板；原地回滚；仅限指令的审批编辑 |
++| **T2** | 断点 park；错误自动暂停；副作用清单；轨迹 diff；分支探索 |
++| **T3** | 基于 `session-log-export` 的导出/导入/重放；基于 `session-stats` 的统计；子 agent 内联；goal 联动 |
++
++T0 比上一版设想的更小：`forkAt(seq)` 已经交付，且已挂载为 turn 尾部的分支操作（`packages/client/ui-conversation/src/client/apply.ts:417`、`chat/TurnTailNodeView.tsx:45`）。
++
++探索上限按"插件内不得硬编码可调项"规则落为可从 `cordis.yml` 修改的、经校验的 `Config` 字段，而非 `DEFAULT_*` 常量；探索默认关闭，因为它会成倍放大成本。
++
++## Alternatives considered
++
++**动态 Cordis 插件。** 作为交付形态被否决：新增会话事件会在下次加载时被拒绝，`RpcMethodMap` 不接受合并，且 conversation 视图的修复位于既有 package 内部。仅保留为 T0 中不增事件、不增 RPC 那部分的原型验证路径。
++
++**为锚点到尾部的遮蔽新增 `SurfaceOp` 变体**（上一版的计划）。被否决：该能力已存在，三键的 `isReplaceOp` 校验会拒绝新增字段，且 `SurfaceOp` 改动落在版本 bump 规则之内——为无所得付出持久化格式代价。
++
++**以"隐形 fork"替代原地回滚** —— 内部 fork 并切换可见的会话卡片。在确认真 replace 语义可用后被否决：它留下的分支血缘会误述用户的实际操作，而其唯一理由是那个后来证明并不存在的 surface 约束。
++
++**在回滚点截断日志。** 被否决：日志只可追加且审计完整，截断会摧毁 agent 实际行为的记录——正是回滚控制台要用来审查的证据。
++
++**在审批处改写工具参数。** 被否决的理由是不可实现而非不可取：`arguments` 为 `readonly` 且调用身份按契约不可变。以纠正性反馈 block 让模型重发调用，可保持 `tool/call` 与实际执行一致。
++
++**为血缘、统计、导出建立专用服务。** 被否决，改为消费已实现这些能力的 `ctx.sessionQuery`、`session-stats` 与 `session-log-export`；重复实现会增加只有单一内部调用者的公开方法。
++
++**把 `trajectory/rewind` 标为 ignorable** 以便旧构建仍能加载回滚过的会话。被否决：无法识别的 rewind 标记会让旧读取器把被遮蔽的历史重建为普通上下文，产生错误的模型请求。显式拒绝才是正确行为。
++
++## Acceptance criteria
++
++- `Session.append` 能将事件标记为 `ignorable`，旧构建跳过此类事件，同时仍拒绝未知的 required 事件。
++- 来源非 compaction 插件的 `user/message` surface replacement 在对话视图中渲染出历史被遮蔽的标记，而非空白。
++- 暂停运行中的 agent 使其变为 `idle` 且排队工作完好，记录一条 `trajectory/pause`，恢复时不伪造空指令。
++- 轨迹行操作在该行边界处 fork、插入所给指令、并在子会话中继续；父轨迹保持完整。
++- 原地回滚追加一条 replacement `user/message` 加 `trajectory/rewind`，模型上下文推导为锚点前缀加插入内容，被遮蔽事件经 `sessionQuery.listEvents` 仍可读为 `shadowed`。
++- 每项新注册均可释放：dispose fiber 后注册被移除。
++- 覆盖率与所涉面匹配，遵循仓库测试策略：边界与 surface 解析的单元测试、通过 Loader 启动测试用 `cordis.yml` 的非单元真实 composition 测试、fork-and-steer 与 rewind 转录的 keyless 快照，以及每项用户可见 GUI 变更从该 PR 自身服务录制的 GIF。
++
++## Risks
++
++**`ignorable` 写入面触及 `packages/core/session`**，每条 append 路径都依赖它。该改动是追加式的、不改变现有调用点，但接口选择具有长期性，应单独评审而非夹在功能 PR 内。
++
++**从用户视角看原地回滚不可逆**，尽管日志保留了一切：回滚后模型上下文不再包含被遮蔽的 turn。被遮蔽事件仍可审计，这正是该方案可接受的原因。
++
++**回滚不撤销世界状态。** 回滚点之前写入的文件、启动的进程、发出的网络调用依然存在。fork 与 rewind 的确认必须展示该区间的副作用清单，并明示这些不会被撤销；探索对每条变体重复该警告。沙箱 checkpoint/restore 会改变这一点，但不在范围内。
++
++**并发回滚争用 surface 尾部。** 基于过期尾部计算的第二次回滚会以 `end seq N not found in surface` 失败。按会话串行化，并在失败时重算。
++
++**`sourceEventSeqs` 随回滚距离增长** —— 回滚数十个 turn 会列举数百个 seq。正确但体积大；UI 不得渲染该数组。
++
++**分支数量无界增长。** 血缘折叠与归档（隐藏而非删除）可保持面板可用。
++
++**探索会成倍放大模型成本。** 可配置的变体数、轮数与 token 上限加上默认关闭的开关对其加以约束；统计面板按次报告消耗。
