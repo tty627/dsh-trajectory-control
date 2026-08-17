@@ -1,0 +1,517 @@
+From a0f30c0e9cc1bd832693957f65f44ff152e9fddf Mon Sep 17 00:00:00 2001
+From: Kissshot <ttyinzg@gmail.com>
+Date: Mon, 17 Aug 2026 14:08:07 +0800
+Subject: [PATCH 4/4] feat(trajectory): branch a child Session from any
+ completed-turn record
+
+The Trajectory view could only be read. Branching existed solely in the
+chat view, on a turn's final message, so a decision point visible as a
+tool call or an intermediate assistant step had no way to fork from it.
+
+Each record whose source event belongs to a closed turn now carries a
+hover branch control that forks through session.fork and opens the child.
+Availability compares the record's source seq against the largest loaded
+turn/end seq: the Host anchors the cut at the first turn/end at or after
+that seq and refuses an anchor whose turn is still open, so a row past the
+last completed turn offers no control rather than a failing one. The
+control stops click and double-click propagation, which the row owns for
+selection and folding.
+
+ui-trajectory owns these rows and already injects sessions, so branchAt
+extends its injected face rather than adding a package or a per-row slot
+inside the virtualized table. Copy stays in the trajectory dictionary,
+passed in as labels because this table renders fixed English column and
+kind labels and takes no translate function.
+
+Live pause needs no new control: the composer's stop already calls the
+same session.cancel, which the Host performs with keepInbox: true.
+---
+ ...tory-control-and-in-place-rewind.i18n.yaml |  4 +-
+ ...-trajectory-control-and-in-place-rewind.md |  4 +-
+ ...ajectory-control-and-in-place-rewind.zh.md |  4 +-
+ .../src/client/TrajectoryTable.module.css     | 30 +++++++
+ .../src/client/TrajectoryTable.tsx            | 54 ++++++++++++
+ .../src/client/TrajectoryView.tsx             | 24 +++++-
+ .../client/ui-trajectory/src/client/index.ts  |  8 ++
+ .../ui-trajectory/src/client/locales.ts       |  6 ++
+ .../ui-trajectory/tests/table.client.spec.tsx | 86 +++++++++++++++++++
+ .../ui-trajectory/tests/views.client.spec.tsx | 45 +++++++++-
+ 10 files changed, 255 insertions(+), 10 deletions(-)
+
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+index 9963f8c..eb1dc33 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.i18n.yaml
+@@ -2,5 +2,5 @@
+ # side as of the last confirmed-consistent state. Both languages carry equal authority;
+ # after editing either side, bring the other along and re-record with:
+ #   pnpm run verify-translation-pairing --write .agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+-2026-08-17-trajectory-control-and-in-place-rewind.md: 0380c590a9e7e43c7a33501b4bf4498d2d1a1c75
+-2026-08-17-trajectory-control-and-in-place-rewind.zh.md: 3197f38b6b65939b36fb1c3746789aa2567693bf
++2026-08-17-trajectory-control-and-in-place-rewind.md: 9c74d884865e7cb0d9e458e147a888776c7aa685
++2026-08-17-trajectory-control-and-in-place-rewind.zh.md: dc8c2e2909d9514802d0f092351f92e44664ec0c
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+index 0380c59..9c74d88 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.md
+@@ -111,12 +111,12 @@ Pre-step "park" — holding a step while a human decides — is feasible: `agent
+ | Stage | Content |
+ |---|---|
+ | **T-1** | `ignorable` writer surface (**shipped**); replacement fallback renderer (**shipped**) |
+-| **T0** | Live pause/resume; trajectory row actions reusing the existing `forkAt`; steer/queue insertion form; pause banner |
++| **T0** | Trajectory row branching (**shipped**); steer/queue insertion form |
+ | **T1** | Annotations; lineage panel over `traceSession`; in-place rewind; instruction-only approval editing |
+ | **T2** | Breakpoint park; automatic error pause; side-effect inventory; trajectory diff; branch exploration |
+ | **T3** | Export/import/replay over `session-log-export`; stats over `session-stats`; subagent inlining; goal coupling |
+ 
+-T0 is smaller than the prior revision assumed: `forkAt(seq)` already ships and is already mounted as a turn-tail branch action (`packages/client/ui-conversation/src/client/apply.ts:417`, `chat/TurnTailNodeView.tsx:45`).
++T0 is smaller than the prior revision assumed, and pause is smaller still: the composer already carries a stop control calling the same `session.cancel`, which the Host performs with `keepInbox: true`, so live pause and resume exist as product behavior and T0 adds no second control for them. What the trajectory view lacked is per-record branching, now shipped: each record whose source event belongs to a closed turn carries a hover branch control that forks through `session.fork` and opens the child. Availability compares the record seq against the largest loaded `turn/end` seq, because the Host anchors the cut at the first `turn/end` at or after it and refuses an anchor whose turn is still open. `ui-trajectory` owns those rows and already injects `sessions`, so the control extends that plugin's injected face rather than introducing a package or a per-row slot inside the virtualized table.
+ 
+ Exploration limits are validated `Config` fields changeable from `cordis.yml`, not `DEFAULT_*` constants, per the no-hardcoded-tunables rule; exploration defaults to disabled because it multiplies cost.
+ 
+diff --git a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+index 3197f38..dc8c2e2 100644
+--- a/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
++++ b/.agents/notes/proposed/architecture/2026-08-17-trajectory-control-and-in-place-rewind.zh.md
+@@ -111,12 +111,12 @@ pre-step "park"——在人类决定期间挂住一步——是可行的：`agen
+ | 阶段 | 内容 |
+ |---|---|
+ | **T-1** | `ignorable` 写入面（**已交付**）；replacement 兜底渲染器（**已交付**） |
+-| **T0** | 实时暂停/恢复；复用既有 `forkAt` 的轨迹行操作；steer/queue 插入表单；暂停横幅 |
++| **T0** | 轨迹行分支（**已交付**）；steer/queue 插入表单 |
+ | **T1** | 标注；基于 `traceSession` 的血缘面板；原地回滚；仅限指令的审批编辑 |
+ | **T2** | 断点 park；错误自动暂停；副作用清单；轨迹 diff；分支探索 |
+ | **T3** | 基于 `session-log-export` 的导出/导入/重放；基于 `session-stats` 的统计；子 agent 内联；goal 联动 |
+ 
+-T0 比上一版设想的更小：`forkAt(seq)` 已经交付，且已挂载为 turn 尾部的分支操作（`packages/client/ui-conversation/src/client/apply.ts:417`、`chat/TurnTailNodeView.tsx:45`）。
++T0 比上一版设想的更小，暂停更是如此：输入框已有的停止控件调用的正是同一个 `session.cancel`，而 Host 以 `keepInbox: true` 执行它，因此实时暂停与恢复作为产品行为已经存在，T0 不再为其新增第二个控件。轨迹视图真正缺的是按记录分支，现已交付：每条源事件属于已闭合 turn 的记录带一个悬停出现的分支控件，经 `session.fork` 分叉并打开子会话。可用性用记录 seq 与已加载的最大 `turn/end` seq 比较，因为 Host 把切点锚定在该 seq 之后的首个 `turn/end`，并拒绝 turn 仍开放的锚点。这些行由 `ui-trajectory` 拥有且它已注入 `sessions`，因此该控件扩展该插件的注入面，而不是新增一个 package 或在虚拟化表格内部开一个按行的 slot。
+ 
+ 探索上限按"插件内不得硬编码可调项"规则落为可从 `cordis.yml` 修改的、经校验的 `Config` 字段，而非 `DEFAULT_*` 常量；探索默认关闭，因为它会成倍放大成本。
+ 
+diff --git a/packages/client/ui-trajectory/src/client/TrajectoryTable.module.css b/packages/client/ui-trajectory/src/client/TrajectoryTable.module.css
+index 71d0b30..1b5f8fa 100644
+--- a/packages/client/ui-trajectory/src/client/TrajectoryTable.module.css
++++ b/packages/client/ui-trajectory/src/client/TrajectoryTable.module.css
+@@ -454,10 +454,40 @@
+ }
+ 
+ .content {
++  position: relative;
+   padding-left: 4px !important;
+   color: var(--dsw-alias-label-primary);
+ }
+ 
++/* Pinned to the row's right edge so it never reflows the summary text as rows
++   scroll under the pointer. Hidden until hover or keyboard focus. */
++.rowBranch {
++  position: absolute;
++  top: 50%;
++  right: 6px;
++  display: none;
++  align-items: center;
++  justify-content: center;
++  width: 20px;
++  height: 20px;
++  padding: 0;
++  border: none;
++  border-radius: 4px;
++  background: var(--dsw-alias-interactive-bg-hover);
++  color: var(--dsw-alias-label-secondary);
++  cursor: pointer;
++  transform: translateY(-50%);
++}
++
++.table tbody tr:hover .rowBranch,
++.rowBranch:focus-visible {
++  display: inline-flex;
++}
++
++.rowBranch:hover {
++  color: var(--dsw-alias-label-primary);
++}
++
+ .kindTag {
+   display: inline-flex;
+   flex: none;
+diff --git a/packages/client/ui-trajectory/src/client/TrajectoryTable.tsx b/packages/client/ui-trajectory/src/client/TrajectoryTable.tsx
+index dab72e6..62f39c4 100644
+--- a/packages/client/ui-trajectory/src/client/TrajectoryTable.tsx
++++ b/packages/client/ui-trajectory/src/client/TrajectoryTable.tsx
+@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
+ import type { CSSProperties, ReactNode } from 'react'
+ import { useVirtualizer } from '@tanstack/react-virtual'
+ import {
++  IconBranchOutline16,
+   IconChevronRightOutline14,
+   IconSettingsOutline16,
+   IconSparkle16,
+@@ -387,6 +388,28 @@ export interface TrajectoryTableProps {
+   inspectCallId?: string | null
+   /** Acknowledge a consumed (or unresolvable) inspect request. */
+   onInspectApplied?: (() => void) | undefined
++  /**
++   * Branch a child Session from the turn owning one record's source event.
++   * Omitted leaves every row without a branch control.
++   */
++  onBranchAt?: ((sourceSeq: number) => void) | undefined
++  /**
++   * Localized branch labels. This table renders its own fixed English column
++   * and kind labels, so the owner supplies translated copy rather than a
++   * translate function.
++   */
++  branchLabels?: {
++    /** Tooltip text on the branch control. */
++    readonly action: string
++    /** Accessible name, given the record's `#index`. */
++    readonly ariaFor: (index: number) => string
++  }
++  /**
++   * Largest `turn/end` seq among loaded completed turns, or `-1` with none. A
++   * record branches only when its source seq is at or below this, because the
++   * Host anchors the cut at the first `turn/end` at or after that seq.
++   */
++  lastCompletedTurnEndSeq?: number
+ }
+ 
+ /** Request-inspector fields shared by ordinary generation and compaction. */
+@@ -1712,6 +1735,9 @@ export function TrajectoryTable({
+   onToggleAssistant,
+   inspectCallId = null,
+   onInspectApplied,
++  onBranchAt,
++  lastCompletedTurnEndSeq = -1,
++  branchLabels,
+ }: TrajectoryTableProps) {
+   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null)
+   const [selectedRequest, setSelectedRequest] = useState<SelectedRequest | null>(null)
+@@ -2279,6 +2305,16 @@ export function TrajectoryTable({
+                   const isRequestOnly = record.cell.requestOnly === true
+                   const isInitialSystem = record.cell.kind === 'system'
+                 && record.cell.index === allRecords[0]?.cell.index
++                  // A branchable row needs a source event whose owning turn has
++                  // closed; a summary or request-anchor row addresses no single
++                  // record, and a still-open turn is refused by the Host.
++                  const branchSourceSeq = onBranchAt !== undefined
++                && !isCollapsedSummary
++                && !isRequestOnly
++                && record.cell.sourceSeq !== undefined
++                && record.cell.sourceSeq <= lastCompletedTurnEndSeq
++                    ? record.cell.sourceSeq
++                    : undefined
+                   const key = requestKey(record.turn, record.group)
+                   const request = requestBoundaries.get(key) === record.cell.index
+                 && !isCollapsedSummary
+@@ -2508,6 +2544,24 @@ export function TrajectoryTable({
+                                 )}
+                               </span>
+                             )}
++                        {branchSourceSeq !== undefined && branchLabels !== undefined && (
++                          <Tooltip label={branchLabels.action} side="top">
++                            <button
++                              type="button"
++                              className={css.rowBranch}
++                              aria-label={branchLabels.ariaFor(record.cell.index)}
++                              // The row owns click (selection) and double-click
++                              // (folding); both would otherwise fire with this.
++                              onClick={(event) => {
++                                event.stopPropagation()
++                                onBranchAt?.(branchSourceSeq)
++                              }}
++                              onDoubleClick={(event) => { event.stopPropagation() }}
++                            >
++                              <IconBranchOutline16 />
++                            </button>
++                          </Tooltip>
++                        )}
+                       </td>
+                     </tr>
+                   )
+diff --git a/packages/client/ui-trajectory/src/client/TrajectoryView.tsx b/packages/client/ui-trajectory/src/client/TrajectoryView.tsx
+index 3672707..1fb620b 100644
+--- a/packages/client/ui-trajectory/src/client/TrajectoryView.tsx
++++ b/packages/client/ui-trajectory/src/client/TrajectoryView.tsx
+@@ -71,6 +71,13 @@ export interface TrajectoryViewInjected {
+   }
+   loadOlder: () => Promise<boolean>
+   setActualDuration: (actualDuration: boolean) => void
++  /**
++   * Fork a child Session from the turn owning `sourceSeq` and open it. The Host
++   * anchors the cut at the first `turn/end` at or after that seq, so any record
++   * inside a completed turn branches that whole turn; a record whose turn is
++   * still open is refused there rather than clipped backward.
++   */
++  branchAt: (sourceSeq: number) => void
+ }
+ 
+ interface UsageLike {
+@@ -118,7 +125,7 @@ function addUsage(
+ }
+ 
+ export function TrajectoryView({
+-  useSession, useDuration, loadOlder, setActualDuration,
++  useSession, useDuration, loadOlder, setActualDuration, branchAt,
+   inspect, onInspectDone, t,
+ }: ConvViewProps & InjectFace<TrajectoryViewInjected> & PropsLocale<'trajectory'>) {
+   const [collapsedTurns, setCollapsedTurns] = useState<ReadonlySet<number>>(EMPTY_TURN_IDS)
+@@ -144,6 +151,18 @@ export function TrajectoryView({
+   const historyLoading = useSession(snapshot => snapshot.openState === 'loading')
+   const olderHistoryLoading = useSession(snapshot => snapshot.loadingOlder)
+   const hasOlderHistory = useSession(snapshot => snapshot.hasMore)
++  // The Host anchors a fork at the first `turn/end` at or after the row's seq,
++  // so a row can branch exactly when some completed turn closes at or after it.
++  // Tracking the largest closing seq keeps this an O(1) comparison per row.
++  const lastCompletedTurnEndSeq = useSession((snapshot) => {
++    let latest = -1
++    for (const endSeq of snapshot.turnEnds.values()) latest = Math.max(latest, endSeq)
++    return latest
++  })
++  const branchLabels = useMemo(() => ({
++    action: t('row.branch'),
++    ariaFor: (index: number) => t('row.branchAria', { index }),
++  }), [t])
+   const nodes = inspection.eventNodes
+   const eventLocations = inspection.eventLocations
+   const historyBaseSeq = nodes[0]?.seq ?? 0
+@@ -499,6 +518,9 @@ export function TrajectoryView({
+           onToggleAssistant={toggleAssistant}
+           inspectCallId={inspect?.callId ?? null}
+           onInspectApplied={onInspectDone}
++          onBranchAt={branchAt}
++          lastCompletedTurnEndSeq={lastCompletedTurnEndSeq}
++          branchLabels={branchLabels}
+         />
+       </div>
+     </div>
+diff --git a/packages/client/ui-trajectory/src/client/index.ts b/packages/client/ui-trajectory/src/client/index.ts
+index ef789dc..0a06d1d 100644
+--- a/packages/client/ui-trajectory/src/client/index.ts
++++ b/packages/client/ui-trajectory/src/client/index.ts
+@@ -59,6 +59,14 @@ export function apply(ctx: Context): void {
+           return session.getSnapshot().views.get('trajectory') !== before
+         },
+         setActualDuration: (value) => { duration.set(value) },
++        branchAt: (sourceSeq: number) => {
++          ctx.sessions.fork({ sessionId, atSeq: sourceSeq, increaseTitle: true })
++            .then((childId) => { ctx.sessions.open(childId) })
++            .catch(() => {
++              // A refused fork (the anchor's turn is still open) or a failed
++              // child rename leaves this trajectory untouched.
++            })
++        },
+       }
+     },
+   }, TrajectoryView))
+diff --git a/packages/client/ui-trajectory/src/client/locales.ts b/packages/client/ui-trajectory/src/client/locales.ts
+index f8adbde..40c6d78 100644
+--- a/packages/client/ui-trajectory/src/client/locales.ts
++++ b/packages/client/ui-trajectory/src/client/locales.ts
+@@ -19,6 +19,8 @@ export type TrajectoryKey =
+   | 'toolbar.collapseCalls'
+   | 'toolbar.search'
+   | 'toolbar.searchPlaceholder'
++  | 'row.branch'
++  | 'row.branchAria'
+ 
+ declare module '@deepseek-ai/dsh-client-ui-slots' {
+   interface LocaleNamespaceMap {
+@@ -43,6 +45,8 @@ export const zh: Record<TrajectoryKey, string> = {
+   'toolbar.collapseCalls': 'Collapse calls',
+   'toolbar.search': '搜索轨迹',
+   'toolbar.searchPlaceholder': '搜索',
++  'row.branch': '在新对话中从此处分支',
++  'row.branchAria': '从记录 #{index} 分支',
+ }
+ 
+ /** English dictionary. */
+@@ -61,4 +65,6 @@ export const en: Record<TrajectoryKey, string> = {
+   'toolbar.collapseCalls': 'Collapse calls',
+   'toolbar.search': 'Search trajectory',
+   'toolbar.searchPlaceholder': 'Search',
++  'row.branch': 'Branch into a new conversation from here',
++  'row.branchAria': 'Branch from record #{index}',
+ }
+diff --git a/packages/client/ui-trajectory/tests/table.client.spec.tsx b/packages/client/ui-trajectory/tests/table.client.spec.tsx
+index 467da80..d390a6b 100644
+--- a/packages/client/ui-trajectory/tests/table.client.spec.tsx
++++ b/packages/client/ui-trajectory/tests/table.client.spec.tsx
+@@ -871,4 +871,90 @@ describe('TrajectoryTable', () => {
+     expect(screen.getByRole('row', { name: /TOOL/ }).getAttribute('aria-selected')).toBe('false')
+     expect(onInspectApplied).not.toHaveBeenCalled()
+   })
++
++  describe('row branch control', () => {
++    const BRANCH_LABELS = {
++      action: 'Branch into a new conversation from here',
++      ariaFor: (index: number) => `Branch from record #${index}`,
++    }
++    const BRANCH_TURNS: readonly TrajectoryTurnModel[] = [{
++      turn: 1,
++      groups: [{
++        title: 'Step 1',
++        cells: [
++          { index: 1, kind: 'user', text: 'first question', sourceSeq: 3, timeSeconds: null },
++          { index: 2, kind: 'tool', text: 'bash', sourceSeq: 9, timeSeconds: null },
++        ],
++      }],
++    }]
++
++    it('branches from the record source seq, without selecting the row', () => {
++      const onBranchAt = vi.fn()
++      const onRecordSelect = vi.fn()
++      render(
++        <TrajectoryTable
++          turns={BRANCH_TURNS}
++          {...FOLD_PROPS}
++          onBranchAt={onBranchAt}
++          onRecordSelect={onRecordSelect}
++          lastCompletedTurnEndSeq={12}
++          branchLabels={BRANCH_LABELS}
++        />,
++      )
++      fireEvent.click(screen.getByRole('button', { name: 'Branch from record #1' }))
++
++      expect(onBranchAt).toHaveBeenCalledWith(3)
++      // The row owns click selection; the control must not trigger it.
++      expect(onRecordSelect).not.toHaveBeenCalled()
++    })
++
++    it('offers no control for a record whose turn has not closed', () => {
++      render(
++        <TrajectoryTable
++          turns={BRANCH_TURNS}
++          {...FOLD_PROPS}
++          onBranchAt={vi.fn()}
++          lastCompletedTurnEndSeq={5}
++          branchLabels={BRANCH_LABELS}
++        />,
++      )
++
++      expect(screen.getByRole('button', { name: 'Branch from record #1' })).toBeTruthy()
++      // seq 9 sits past the last completed turn end, so the Host would refuse it.
++      expect(screen.queryByRole('button', { name: 'Branch from record #2' })).toBeNull()
++    })
++
++    it('offers no control without a completed turn, a handler, or labels', () => {
++      const { unmount } = render(
++        <TrajectoryTable
++          turns={BRANCH_TURNS}
++          {...FOLD_PROPS}
++          onBranchAt={vi.fn()}
++          branchLabels={BRANCH_LABELS}
++        />,
++      )
++      expect(screen.queryByRole('button', { name: /^Branch from record/ })).toBeNull()
++      unmount()
++
++      render(<TrajectoryTable turns={BRANCH_TURNS} {...FOLD_PROPS} lastCompletedTurnEndSeq={12} branchLabels={BRANCH_LABELS} />)
++      expect(screen.queryByRole('button', { name: /^Branch from record/ })).toBeNull()
++    })
++
++    it('offers no control for a record carrying no source event', () => {
++      render(
++        <TrajectoryTable
++          turns={[{
++            turn: 1,
++            groups: [{ title: 'Step 1', cells: [{ index: 1, kind: 'message', text: 'no seq', timeSeconds: null }] }],
++          }]}
++          {...FOLD_PROPS}
++          onBranchAt={vi.fn()}
++          lastCompletedTurnEndSeq={12}
++          branchLabels={BRANCH_LABELS}
++        />,
++      )
++
++      expect(screen.queryByRole('button', { name: /^Branch from record/ })).toBeNull()
++    })
++  })
+ })
+diff --git a/packages/client/ui-trajectory/tests/views.client.spec.tsx b/packages/client/ui-trajectory/tests/views.client.spec.tsx
+index 77c3587..a0361fd 100644
+--- a/packages/client/ui-trajectory/tests/views.client.spec.tsx
++++ b/packages/client/ui-trajectory/tests/views.client.spec.tsx
+@@ -159,16 +159,23 @@ function emptyWorkspaces() {
+ /** Standalone view props: the session-scope standard kit the outlet would bake. */
+ function standaloneProps(
+   nodes: ConversationSnapshot['nodes'],
+-): ConvViewProps & { t: (key: LocaleKeysOf<'trajectory'>) => string } {
++): ConvViewProps & {
++  t: (key: LocaleKeysOf<'trajectory'>) => string
++  branchAt: (sourceSeq: number) => void
++} {
+   return {
+     sessionId: SID,
+     useSession: fakeSession(nodes).useSession,
+     useSessions: emptySessions(),
+     useWorkspaces: emptyWorkspaces(),
+     useProjection: (() => undefined) as never,
++    branchAt: () => {},
+     // The locale seat the outlet would inject for the declared namespace.
+     t: (key: LocaleKeysOf<'trajectory'>) => zh[key as TrajectoryKey] ?? key,
+-  } as unknown as ConvViewProps & { t: (key: LocaleKeysOf<'trajectory'>) => string }
++  } as unknown as ConvViewProps & {
++    t: (key: LocaleKeysOf<'trajectory'>) => string
++    branchAt: (sourceSeq: number) => void
++  }
+ }
+ 
+ /** Real-stack bench: root Context + real SlotRegistry ring + the plugin fiber. */
+@@ -184,8 +191,12 @@ async function bench(snapshot = historySnapshot(NODES)) {
+   }
+   await ctx.plugin(ConversationEventRegistry).await()
+   await ctx.plugin(ConversationViewRegistry).await()
++  const fork = vi.fn(() => Promise.resolve('child-session' as SessionId))
++  const open = vi.fn()
+   ctx.provide('sessions', {
+     binding: () => ({ session }),
++    fork,
++    open,
+   })
+   sessionSnapshots.set(slots, sessionStore)
+   // The conversation entry's role: declare the ring, then seed the chat entry.
+@@ -205,7 +216,7 @@ async function bench(snapshot = historySnapshot(NODES)) {
+   ctx.plugin({ inject: [...localeInject], apply: localeApply })
+   const fiber = ctx.plugin({ inject: [...inject], apply })
+   await fiber.await()
+-  return { ctx, slots, fiber, loadOlder, sessionStore }
++  return { ctx, slots, fiber, loadOlder, sessionStore, fork, open }
+ }
+ 
+ /** Tab projection twin of apply's viewTabs (the render-side consumption path). */
+@@ -355,6 +366,34 @@ describe('plugin registration', () => {
+     })
+     expect(await injected.loadOlder()).toBe(true)
+   })
++
++  it('branches at a record seq and opens the child Session', async () => {
++    const b = await bench()
++    const entry = b.slots.entries('conversation.view')
++      .find(candidate => candidate.options.id === 'trajectory')
++    const injectEntry = entry!.inject as unknown as (
++      sessionId: SessionId,
++    ) => TrajectoryViewInjected
++    injectEntry(SID).branchAt(7)
++
++    expect(b.fork).toHaveBeenCalledWith({ sessionId: SID, atSeq: 7, increaseTitle: true })
++    await vi.waitFor(() => { expect(b.open).toHaveBeenCalledWith('child-session') })
++  })
++
++  it('leaves the source view untouched when the branch is refused', async () => {
++    const b = await bench()
++    b.fork.mockImplementationOnce(() => Promise.reject(new Error('fork-unavailable')))
++    const entry = b.slots.entries('conversation.view')
++      .find(candidate => candidate.options.id === 'trajectory')
++    const injectEntry = entry!.inject as unknown as (
++      sessionId: SessionId,
++    ) => TrajectoryViewInjected
++
++    // A rejected fork must not surface as an unhandled rejection.
++    expect(() => { injectEntry(SID).branchAt(7) }).not.toThrow()
++    await vi.waitFor(() => { expect(b.fork).toHaveBeenCalled() })
++    expect(b.open).not.toHaveBeenCalled()
++  })
+ })
+ 
+ describe('tab switching in ConversationRoot', () => {
+-- 
+2.51.0
+

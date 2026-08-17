@@ -1,7 +1,7 @@
 From 590ec23d1d45b66374265be8dfffebae0d24a9c5 Mon Sep 17 00:00:00 2001
 From: Kissshot <ttyinzg@gmail.com>
 Date: Mon, 17 Aug 2026 11:46:49 +0800
-Subject: [PATCH 2/3] fix(client): render surface replacements no Definition
+Subject: [PATCH 2/4] fix(client): render surface replacements no Definition
  claims
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

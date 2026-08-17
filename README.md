@@ -30,12 +30,15 @@ DSH 的 Trajectory 视图能逐事件回看一个 agent 干了什么，但只能
 | `0001` | 设计文档本身，作为 Agent Note 放入 `.agents/notes/proposed/architecture/` |
 | `0002` | 修复：无人认领的 surface replacement 在对话视图中渲染为空白 |
 | `0003` | 新增：`Session.append` 可声明 `ignorable`，补上该字段缺失的写入方 |
+| `0004` | 新增：轨迹每一行可从该处分支出一条子会话 |
 
 `0002` 是当前就存在的真实缺陷，与本功能无关也值得修：`ui-conversation` 靠硬编码插件名识别 replacement，只认压缩功能，而通用兜底只认 append 来源。因此除压缩之外任何生产者的 `user/message` replacement 都无人认领、无人兜底——**页面上什么都不显示**。原地回滚产生的正是这种事件形状。
 
 `0003` 补上一个上游已预留的扩展点：`ignorable` 标记决定"读取方遇到不认识的事件类型时可以跳过、还是必须拒绝整条日志"。该字段早已被 seed 校验、两个持久化后端与 wire schema 认可，但没有任何写入方能设置它。上游的[版本机制 Agent Note](https://github.com/deepseek-ai/deepseek-harness/blob/main/.agents/notes/implemented/architecture/2026-08-10-session-log-version-mechanism.md) 写明这个口子留给"第一个需要它的使用者"。
 
-`0002` 与 `0003` 都改动了 `0001` 引入的 Agent Note，所以三个补丁必须按序应用。
+`0004` 是 T0 的第一项：轨迹视图此前只能读，分支只存在于对话视图的每轮末尾消息上，因此一个体现为工具调用或中间步骤的决策点无法从那里分叉。现在每条源事件属于已闭合 turn 的记录都带一个悬停出现的分支控件。
+
+后三个补丁都改动了 `0001` 引入的 Agent Note，所以四个补丁必须按序应用。
 
 ### 应用补丁
 
@@ -53,12 +56,15 @@ git am /path/to/dsh-trajectory-control/patches/*.patch
 |---|---|---|
 | T-1 | replacement 兜底渲染 | 已完成（补丁 `0002`） |
 | T-1 | `ignorable` 写入面 | 已完成（补丁 `0003`） |
-| T0 | 实时暂停/恢复、轨迹行操作、插话表单、暂停横幅 | 未开始 |
+| T0 | 轨迹行分支 | 已完成（补丁 `0004`） |
+| T0 | 插话表单（分支后自动带指令续跑） | 未开始 |
 | T1 | 标注、血缘树、原地回滚、审批改指令 | 未开始 |
 | T2 | 断点、错误自动暂停、副作用清单、Diff、分支探索 | 未开始 |
 | T3 | 导出/重放、统计、子 agent 内联、goal 联动 | 未开始 |
 
 T-1 两项是地基：没有它们，新事件会成为日志定时炸弹，且原地回滚的界面是空白的。
+
+实时暂停/恢复不在列表内：输入框已有的"停止生成"调用的正是同一个 `cancel(keepInbox)`，作为产品行为已经存在，无需再加第二个控件。
 
 ## 许可
 
