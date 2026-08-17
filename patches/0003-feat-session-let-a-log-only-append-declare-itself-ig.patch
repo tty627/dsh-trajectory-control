@@ -1,7 +1,7 @@
 From 8c528751790c9af50298507ddc26f8427fcacb46 Mon Sep 17 00:00:00 2001
 From: Kissshot <ttyinzg@gmail.com>
 Date: Mon, 17 Aug 2026 13:24:32 +0800
-Subject: [PATCH 3/4] feat(session): let a log-only append declare itself
+Subject: [PATCH 3/5] feat(session): let a log-only append declare itself
  ignorable
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

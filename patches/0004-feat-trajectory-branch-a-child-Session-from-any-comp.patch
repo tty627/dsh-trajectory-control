@@ -1,7 +1,7 @@
 From a0f30c0e9cc1bd832693957f65f44ff152e9fddf Mon Sep 17 00:00:00 2001
 From: Kissshot <ttyinzg@gmail.com>
 Date: Mon, 17 Aug 2026 14:08:07 +0800
-Subject: [PATCH 4/4] feat(trajectory): branch a child Session from any
+Subject: [PATCH 4/5] feat(trajectory): branch a child Session from any
  completed-turn record
 
 The Trajectory view could only be read. Branching existed solely in the
